@@ -1,0 +1,112 @@
+"""
+Phase 7 result cache: maps (owner, repo, commit_sha) -> the report files
+generate_report() already wrote, so a repo that hasn't changed since its
+last rating doesn't burn Anthropic budget on a re-rate.
+
+Deliberately keyed on commit SHA, not the date-based filename scheme from
+Phase 5 -- that scheme is for humans browsing reports/ratings/ by eye, this
+is a cache lookup that needs to know whether the CODE has changed, not
+whether a day has passed.
+
+Stores pointers to the existing .json/.md/.pdf files, never the RepoRating
+inline -- report_writer.py's persisted JSON stays the one source of truth
+for a rating's content, this file just indexes it.
+
+Not process-safe across multiple workers (plain read-modify-write of one
+JSON file) -- fine for uvicorn's default single process; horizontal
+scaling is explicitly out of scope for this phase. Within one process,
+callers (web_app.py) are expected to hold a shared asyncio.Lock around
+lookup()+record() pairs to avoid a lost update.
+"""
+
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+from server.Report_Writing.report_schema import RepoRating
+from server.Report_Writing.report_writer import REPORTS_DIR
+
+CACHE_INDEX_PATH = REPORTS_DIR / "cache_index.json"
+
+
+@dataclass
+class CacheEntry:
+    owner: str
+    repo: str
+    sha: str
+    generated_at: str
+    json_path: Path
+    md_path: Path
+    pdf_path: Path | None
+
+    def load_rating(self) -> RepoRating:
+        return RepoRating.model_validate_json(self.json_path.read_text(encoding="utf-8"))
+
+
+def _cache_key(owner: str, repo: str, sha: str) -> str:
+    return f"{owner}/{repo}@{sha}"
+
+
+def _read_index() -> dict[str, Any]:
+    if not CACHE_INDEX_PATH.exists():
+        return {"schema_version": "1", "entries": {}}
+    return json.loads(CACHE_INDEX_PATH.read_text(encoding="utf-8"))
+
+
+def _write_index(data: dict[str, Any]) -> None:
+    CACHE_INDEX_PATH.parent.mkdir(parents=True, exist_ok=True)
+    CACHE_INDEX_PATH.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+
+def _entry_from_dict(d: dict[str, Any]) -> CacheEntry:
+    return CacheEntry(
+        owner=d["owner"],
+        repo=d["repo"],
+        sha=d["sha"],
+        generated_at=d["generated_at"],
+        json_path=Path(d["json_path"]),
+        md_path=Path(d["md_path"]),
+        pdf_path=Path(d["pdf_path"]) if d.get("pdf_path") else None,
+    )
+
+
+def lookup(owner: str, repo: str, sha: str) -> CacheEntry | None:
+    index = _read_index()
+    raw = index["entries"].get(_cache_key(owner, repo, sha))
+    return _entry_from_dict(raw) if raw is not None else None
+
+
+def record(
+    owner: str,
+    repo: str,
+    sha: str,
+    generated_at: str,
+    json_path: Path,
+    md_path: Path,
+    pdf_path: Path | None,
+) -> None:
+    index = _read_index()
+    index["entries"][_cache_key(owner, repo, sha)] = {
+        "owner": owner,
+        "repo": repo,
+        "sha": sha,
+        "generated_at": generated_at,
+        "json_path": str(json_path),
+        "md_path": str(md_path),
+        "pdf_path": str(pdf_path) if pdf_path else None,
+    }
+    _write_index(index)
+
+
+def latest_for_repo(owner: str, repo: str) -> CacheEntry | None:
+    index = _read_index()
+    matches = [
+        d for d in index["entries"].values() if d["owner"] == owner and d["repo"] == repo
+    ]
+    if not matches:
+        return None
+    latest = max(matches, key=lambda d: d["generated_at"])
+    return _entry_from_dict(latest)

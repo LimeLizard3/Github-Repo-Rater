@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+
+# Generated at runtime, not source -- rating outputs, the cache index, and
+# the daily usage counter. reports/ratings/ is recreated automatically by
+# report_writer.py on first run.
+reports/ratings/
+
+# Local tooling state, not project content.
+.claude/
+.pytest_cache/
