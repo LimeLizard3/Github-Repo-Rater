@@ -3,9 +3,18 @@ Phase 4 coordinator -- runs a repo through the full rating pipeline end to
 end: triage -> fetch selected file content -> dispatch all 3 subagents in
 parallel -> aggregate into one result.
 
-Pipeline logic only, per PHASE4_BRIEF.pdf. No caching, no HTTP endpoint, no
-4th synthesis LLM call. This module returns/prints a plain dict; formalizing
-that into a validated JSON schema and persisting it is Phase 5's job.
+Pipeline logic only, per PHASE4_BRIEF.pdf. No caching, no HTTP endpoint.
+This module returns/prints a plain dict; formalizing that into a validated
+JSON schema and persisting it is Phase 5's job.
+
+2026-08-31: added a 4th, sequential subagent call (recommendations) after
+the original 3 -- a deliberate reversal of this file's own former "no 4th
+synthesis LLM call" rule, done explicitly with Liam's direction, not
+silently. It's NOT part of the rubric: it never affects quality_score,
+and a failure there degrades gracefully (a "Not available" section) same
+as the other 3, never crashes the whole rating. See
+server/Subagents/recommendations_subagent.py and
+_build_dimension_summary() below.
 
 Results/Functionality score: PHASE3_BRIEF.pdf's issues_found schema has no
 numeric per-issue deduction field, only a severity CATEGORY (critical /
@@ -50,6 +59,7 @@ from server.triage import (
 from server.Subagents.architecture_subagent import score as score_architecture
 from server.Subagents.results_subagent import score as score_results
 from server.Subagents.docs_subagent import score as score_docs
+from server.Subagents.recommendations_subagent import score as score_recommendations
 
 _CRITICAL_DEDUCTION = -5
 _MAJOR_DEDUCTION = -3
@@ -137,6 +147,49 @@ def _aggregate_strengths_weaknesses(
         weaknesses += [f"[Design/Docs] {w}" for w in documentation["weaknesses"]]
     return strengths, weaknesses
 
+
+def _build_dimension_summary(
+    architecture: dict[str, Any],
+    results_functionality: dict[str, Any],
+    documentation: dict[str, Any],
+) -> str:
+    """Plain-text summary of the other 3 dimensions' findings, fed to the
+    recommendations subagent instead of re-sending the repo's raw files a
+    second time -- keeps that call focused and cheap."""
+    sections: list[str] = []
+
+    if architecture["status"] == "ok":
+        sections.append(
+            f"Architecture (score {architecture['score']}/10): {architecture['justification']}\n"
+            f"Strengths: {'; '.join(architecture['strengths'])}\n"
+            f"Weaknesses: {'; '.join(architecture['weaknesses'])}"
+        )
+    else:
+        sections.append("Architecture: not available")
+
+    if results_functionality["status"] == "ok":
+        issue_lines = "; ".join(
+            f"[{i['severity']}] {i['description']}" for i in results_functionality["issues_found"]
+        )
+        sections.append(
+            f"Results/Functionality (score {results_functionality['score']}/10): "
+            f"{results_functionality['justification']}\nIssues found: {issue_lines}"
+        )
+    else:
+        sections.append("Results/Functionality: not available")
+
+    if documentation["status"] == "ok" and documentation["present"]:
+        sections.append(
+            f"Design/Docs (completeness {documentation['completeness']}/10): "
+            f"{documentation['justification']}\n"
+            f"Strengths: {'; '.join(documentation['strengths'])}\n"
+            f"Weaknesses: {'; '.join(documentation['weaknesses'])}"
+        )
+    else:
+        sections.append("Design/Docs: not available or no documentation present")
+
+    return "\n\n".join(sections)
+
 async def _fetch_plan_files(
     client: GitHubClient, owner: str, repo: str, ref: str, plan: SelectionPlan
 ) -> dict[str, str]:
@@ -216,12 +269,27 @@ async def rate_repo(client: GitHubClient, owner: str, repo: str) -> dict[str, An
     quality_score = _compute_quality_score(architecture, results_functionality, documentation)
     strengths, weaknesses = _aggregate_strengths_weaknesses(architecture, results_functionality, documentation)
 
+    # Sequential, not part of asyncio.gather() above -- this call needs the
+    # other 3 dimensions' results as context, so it can only run after they
+    # finish. Never affects quality_score or the other dimensions; a
+    # failure here degrades gracefully same as the other 3 do.
+    dimension_summary = _build_dimension_summary(architecture, results_functionality, documentation)
+    try:
+        recs_raw = await score_recommendations(docs_files, dimension_summary)
+        recommendations: dict[str, Any] = {
+            "status": "ok",
+            "recommendations": recs_raw.get("recommendations", []),
+        }
+    except Exception as e:
+        recommendations = {"status": "failed", "error": str(e), "recommendations": []}
+
     return {
         "repo": f"{owner}/{repo}",
         "quality_score": quality_score,
         "architecture": architecture,
         "results_functionality": results_functionality,
         "documentation": documentation,
+        "recommendations": recommendations,
         "strengths": strengths,
         "weaknesses": weaknesses,
     }

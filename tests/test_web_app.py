@@ -47,6 +47,10 @@ CANNED_RAW = {
         "strengths": ["Clear setup instructions"],
         "weaknesses": [],
     },
+    "recommendations": {
+        "status": "ok",
+        "recommendations": ["Consider adding a CLI flag for custom output paths."],
+    },
     "strengths": ["[Architecture] Clear module boundaries"],
     "weaknesses": ["[Architecture] Some duplication"],
 }

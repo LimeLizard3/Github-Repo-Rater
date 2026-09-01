@@ -22,6 +22,11 @@ matching Architecture/Documentation -- previously the only dimension
 without them, so it was the only one missing from every report's "Overall
 Strengths/Weaknesses" summary. Purely descriptive; issues_found is still
 the only thing that drives the score.
+
+2026-08-31: added RecommendationsResult, a 4th dimension -- NOT part of
+the rubric, never affects quality_score. Forward-looking suggestions from
+a new subagent that runs after the other 3, given their combined findings
+as context. See server/Subagents/recommendations_subagent.py.
 """
 
 from __future__ import annotations
@@ -71,6 +76,12 @@ class DocumentationResult(BaseModel):
     error: Optional[str] = None
 
 
+class RecommendationsResult(BaseModel):
+    status: DimensionStatus
+    recommendations: list[str] = []
+    error: Optional[str] = None
+
+
 class RepoRating(BaseModel):
     schema_version: Literal["1"] = "1"
     repo: str
@@ -79,5 +90,6 @@ class RepoRating(BaseModel):
     architecture: ArchitectureResult
     results_functionality: ResultsFunctionalityResult
     documentation: DocumentationResult
+    recommendations: RecommendationsResult
     strengths: list[str] = []
     weaknesses: list[str] = []

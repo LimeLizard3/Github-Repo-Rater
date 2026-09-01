@@ -157,7 +157,8 @@ def test_format_generated_at_falls_back_on_unparseable_input():
 def test_render_html_has_no_duplicate_title_or_quality_score():
     md = "# owner/repo\n\n**Quality score:** 8.0/10\n\n## Architecture:\n\nSome text."
     html = render_html(md, title="owner/repo", quality_score=8.0, generated_at="2026-08-31T00:00:00Z")
-    assert html.count("<h1>") == 1  # only the header bar's h1, not a second one in the body
-    assert html.count("Quality score") == 0  # replaced entirely by the header bar's badge
+    assert html.count("<h1") == 1  # only the cover page's h1, not a second one in the body
+    assert html.count("Quality score") == 0  # replaced entirely by the cover page's badge
     assert "qs-badge" in html
+    assert "cover-page" in html
     assert "August 31, 2026" in html

@@ -201,6 +201,15 @@ def render_markdown(rating: RepoRating) -> str:
         lines += _plain_items(rating.weaknesses)
         lines.append("")
 
+    lines.append("## Recommendations:")
+    lines.append("")
+    rec = rating.recommendations
+    if rec.status == DimensionStatus.FAILED:
+        lines.append(f"**Not available** — {_escape_markdown(rec.error or '')}")
+    else:
+        lines += _plain_items(rec.recommendations)
+    lines.append("")
+
     return "\n".join(lines)
 
 
@@ -280,15 +289,41 @@ _STYLE = """
   --navy: #16213e; --accent: #2c5aa0; --text: #1a1a1a; --text-muted: #55607a;
 }
 * { box-sizing: border-box; }
+
+/* Page margins reserve room at the bottom for the footer/page-number
+   margin box below; left/right/top stay at 0 since .report-body's own
+   padding already provides that spacing -- avoids doubling up on both. */
+@page {
+  margin: 0 0 1.4cm 0;
+  @bottom-center {
+    content: "GitHub Repo-Rater  \\2022  Page " counter(page) " of " counter(pages);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    font-size: 8px; color: #8a93a6;
+  }
+}
+/* No footer on the cover page -- the base footer's gray text would be
+   unreadable against the navy background, and the cover already states
+   the report's identity on its own. */
+@page cover { margin: 0; }
+
 body {
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
   margin: 0; color: var(--text); line-height: 1.55; background: #fff;
 }
-.report-header { background: var(--navy); color: #fff; padding: 2em 2.2em 1.6em; }
-.report-header h1 { margin: 0 0 0.8em; font-size: 1.6em; font-weight: 700; word-break: break-word; }
-.report-meta { display: flex; gap: 2.2em; flex-wrap: wrap; }
+.cover-page {
+  page: cover;
+  break-after: page; page-break-after: always;
+  background: var(--navy); color: #fff;
+  min-height: 100vh; padding: 3.5em 3em;
+  display: flex; flex-direction: column; justify-content: center; align-items: flex-start;
+}
+.cover-eyebrow { font-size: 0.85em; text-transform: uppercase; letter-spacing: 0.12em; color: #8fa0c7; margin-bottom: 1.1em; }
+.cover-title { font-size: 2.3em; font-weight: 700; margin: 0 0 1.3em; word-break: break-word; max-width: 14em; }
+.cover-score-block { margin-bottom: 1.6em; }
+.cover-score-block .qs-badge { font-size: 1.8em; padding: 0.35em 1em; }
+.cover-generated { color: #d7deee; font-size: 1.05em; margin-bottom: 2.2em; }
+.cover-methodology { color: #8fa0c7; font-size: 0.85em; max-width: 22em; }
 .meta-label { font-size: 0.72em; text-transform: uppercase; letter-spacing: 0.06em; color: #8fa0c7; margin-bottom: 0.35em; }
-.meta-value { font-size: 1.05em; }
 .report-body { padding: 1.8em 2.2em 2.5em; max-width: 54em; }
 h2 { color: var(--navy); border-bottom: 2px solid var(--accent); padding-bottom: 0.25em; margin-top: 1.9em; font-size: 1.22em; }
 p { color: var(--text); }
@@ -320,25 +355,22 @@ def render_html(markdown_text: str, title: str, quality_score: float | None, gen
     body = markdown_lib.markdown(markdown_text)
     body = _strip_redundant_header_lines(body)
     body = _apply_badges(body)
-    header = (
-        '<div class="report-header">'
-        f"<h1>{title}</h1>"
-        '<div class="report-meta">'
-        '<div class="meta-item">'
+    cover_page = (
+        '<div class="cover-page">'
+        '<div class="cover-eyebrow">GitHub Repo-Rater</div>'
+        f"<h1 class=\"cover-title\">{title}</h1>"
+        '<div class="cover-score-block">'
         '<div class="meta-label">Quality Score</div>'
-        f'<div class="meta-value">{_quality_score_badge(quality_score)}</div>'
+        f"<div>{_quality_score_badge(quality_score)}</div>"
         "</div>"
-        '<div class="meta-item">'
-        '<div class="meta-label">Generated</div>'
-        f'<div class="meta-value">{_format_generated_at(generated_at)}</div>'
-        "</div>"
-        "</div>"
+        f'<div class="cover-generated">Generated {_format_generated_at(generated_at)}</div>'
+        '<div class="cover-methodology">Rated across Architecture, Results/Functionality, and Design/Docs</div>'
         "</div>"
     )
     return (
         "<!DOCTYPE html>\n"
         f"<html><head><meta charset=\"utf-8\"><title>{title}</title>{_STYLE}</head>\n"
-        f"<body>\n{header}\n<div class=\"report-body\">\n{body}\n</div>\n</body></html>\n"
+        f"<body>\n{cover_page}\n<div class=\"report-body\">\n{body}\n</div>\n</body></html>\n"
     )
 
 

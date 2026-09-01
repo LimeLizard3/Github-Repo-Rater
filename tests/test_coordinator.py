@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from server.coordinator import (
     _aggregate_strengths_weaknesses,
+    _build_dimension_summary,
     _compute_quality_score,
     _compute_results_score,
 )
@@ -172,3 +173,29 @@ def test_absent_docs_excluded_even_if_subagent_status_ok():
     strengths, _ = _aggregate_strengths_weaknesses(arch, results, docs)
 
     assert strengths == []
+
+
+# --- _build_dimension_summary ----------------------------------------------
+
+
+def test_summary_includes_all_three_dimensions_when_ok():
+    arch = _dim_ok(score=8, justification="Well organized.", strengths=["a"], weaknesses=["b"])
+    results = _dim_ok(score=7, justification="Mostly works.", issues_found=[_issue("minor")])
+    docs = _dim_ok(present=True, completeness=6, justification="Decent README.", strengths=["c"], weaknesses=["d"])
+
+    summary = _build_dimension_summary(arch, results, docs)
+
+    assert "Architecture (score 8/10)" in summary
+    assert "Results/Functionality (score 7/10)" in summary
+    assert "Design/Docs (completeness 6/10)" in summary
+
+
+def test_summary_marks_failed_or_absent_dimensions():
+    arch = _dim_failed()
+    results = _dim_ok(score=7, justification="x", issues_found=[])
+    docs = _dim_ok(present=False)
+
+    summary = _build_dimension_summary(arch, results, docs)
+
+    assert "Architecture: not available" in summary
+    assert "Design/Docs: not available" in summary
