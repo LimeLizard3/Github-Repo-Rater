@@ -174,7 +174,7 @@ def _breadth_spread( #This function determines how exactly we're going to spend 
         for d in dir_names:
             idx = cursors[d]
             files = groups[d]
-            if idx >= len(files):
+            if idx >= len(files): #Skips directory if it's already given up everything it has
                 continue
             entry = files[idx]
             cursors[d] += 1
