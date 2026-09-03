@@ -3,30 +3,27 @@ Phase 7 website: the public HTTP layer wrapping the existing coordinator +
 Phase 5 report pipeline. Calls GitHubClient directly, same as the CLI
 pipeline -- server/app.py's MCP server stays inactive, not reintroduced.
 
+2026-09-03: browser/HTML routes (/, /rate, /report/{owner}/{repo}) removed
+-- this backend is app-only now, serving the React Native mobile app
+exclusively. No webpage view exists anymore; every rating-related route
+returns either a PDF file or a small JSON error.
+
 Run locally:
     python -m server.Website.web_app
 
 Routes:
-    GET  /                                  -- a form page: paste a repo
-        link or "owner/repo", submits to /rate via fetch(), replaces the
-        page with the result. Not part of PHASE7_BRIEF.pdf's spec (that
-        brief only described the JSON API); added afterward so the site is
-        actually usable from a browser without a separate frontend.
-    POST /rate {"owner": ..., "repo": ...}  -- rate a repo (cached by
+    POST /api/rate {"owner": ..., "repo": ...}  -- rate a repo (cached by
         (owner, repo, commit_sha); a cache hit costs nothing and doesn't
-        count against the daily usage cap)
-    GET  /report/{owner}/{repo}             -- most recent cached rating
-        for that repo, regardless of SHA
+        count against the daily usage cap), returns the actual PDF file.
+    GET  /api/report/{owner}/{repo}             -- most recent cached
+        rating's PDF for that repo, regardless of SHA.
 
-    POST /api/rate {"owner": ..., "repo": ...}  -- same as /rate, but
-        returns the actual PDF file instead of an HTML page. Added for the
-        mobile app, which wants a downloadable file, not a webpage.
-    GET  /api/report/{owner}/{repo}             -- same as /report/..., PDF
-        instead of HTML.
-
-    All 4 rating-related routes share one helper, _get_or_create_entry(),
-    for the resolve/cache/usage-cap/pipeline logic -- only the final
-    "package it as HTML or as a PDF file" step differs between them.
+    Both routes share _pdf_response() for turning a CacheEntry into the
+    final PDF (or error) response. rate_pdf() used to also share a
+    _get_or_create_entry()/_parse_rate_body() pair with a since-removed
+    HTML route; once that second caller was gone, those two had exactly
+    one caller left each, so they were folded back into rate_pdf()
+    directly -- no remaining reason to keep them separate.
 """
 
 from __future__ import annotations
@@ -37,18 +34,13 @@ from datetime import datetime, timezone
 
 from starlette.applications import Starlette
 from starlette.requests import Request
-from starlette.responses import FileResponse, HTMLResponse, JSONResponse
+from starlette.responses import FileResponse, JSONResponse
 from starlette.routing import Route
 
 from server import config
 from server.coordinator import rate_repo
 from server.github_client import GitHubAPIError, GitHubClient
-from server.Report_Writing.report_writer import (
-    generate_report,
-    parse_rating,
-    render_html,
-    render_markdown,
-)
+from server.Report_Writing.report_writer import generate_report, parse_rating
 from server.Website import cache_index, usage_cap
 
 config.validate()
@@ -62,86 +54,29 @@ _gh = GitHubClient(config.GITHUB_TOKEN)
 _lock = asyncio.Lock() #Guarantees only 1 piece of code at a time can be inside a section that touches cache-index/usage files
 
 
-def _rating_response(rating) -> HTMLResponse:
-    return HTMLResponse(
-        render_html(
-            render_markdown(rating),
-            title=rating.repo,
-            quality_score=rating.quality_score,
-            generated_at=rating.generated_at,
+def _pdf_response(entry: cache_index.CacheEntry, owner: str, repo: str) -> JSONResponse | FileResponse:
+    if entry.pdf_path is None:
+        return JSONResponse(
+            {
+                "error": f"PDF generation failed for this rating of {owner}/{repo}. "
+                f"Try again later."
+            },
+            status_code=500,
         )
-    )
+    return FileResponse(entry.pdf_path, media_type="application/pdf", filename=f"{owner}__{repo}.pdf")
 
 
-_HOME_PAGE_HTML = """<!DOCTYPE html>
-<html>
-<head>
-<meta charset="utf-8">
-<title>GitHub Repo-Rater</title>
-<style>
-  body { font-family: system-ui, sans-serif; max-width: 40em; margin: 4em auto; padding: 0 1em; }
-  input { width: 100%; box-sizing: border-box; font-size: 1.1em; padding: 0.5em; }
-  button { margin-top: 0.75em; font-size: 1.1em; padding: 0.5em 1.5em; cursor: pointer; }
-  #status { color: #555; }
-</style>
-</head>
-<body>
-<h1>GitHub Repo-Rater</h1>
-<p>Paste a GitHub repo link (or just "owner/repo") to rate it.</p>
-<form id="rate-form">
-  <input type="text" id="repo-input" placeholder="https://github.com/owner/repo" required>
-  <button type="submit">Rate</button>
-</form>
-<p id="status"></p>
-<script>
-document.getElementById('rate-form').addEventListener('submit', async (e) => {
-  e.preventDefault();
-  const statusEl = document.getElementById('status');
-  let cleaned = document.getElementById('repo-input').value.trim()
-    .replace(/^https?:\\/\\/(www\\.)?github\\.com\\//, '')
-    .replace(/\\.git$/, '')
-    .replace(/\\/$/, '');
-  const parts = cleaned.split('/').filter(Boolean);
-  if (parts.length < 2) {
-    statusEl.textContent = 'Could not find an owner/repo in that -- try "owner/repo" or a full github.com link.';
-    return;
-  }
-  const [owner, repo] = parts;
-  statusEl.textContent = `Rating ${owner}/${repo}... this can take up to ~30 seconds on a cache miss.`;
+async def rate_pdf(request: Request) -> JSONResponse | FileResponse:
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Request body must be JSON."}, status_code=400)
 
-  const resp = await fetch('/rate', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({owner, repo}),
-  });
-  const text = await resp.text();
-  if (resp.ok) {
-    document.open();
-    document.write(text);
-    document.close();
-  } else {
-    try {
-      statusEl.textContent = 'Error: ' + JSON.parse(text).error;
-    } catch {
-      statusEl.textContent = 'Error: ' + resp.status;
-    }
-  }
-});
-</script>
-</body>
-</html>"""
+    owner = (body.get("owner") or "").strip()
+    repo = (body.get("repo") or "").strip()
+    if not owner or not repo:
+        return JSONResponse({"error": "owner and repo are required"}, status_code=400)
 
-
-async def home(request: Request) -> HTMLResponse:
-    return HTMLResponse(_HOME_PAGE_HTML)
-
-
-async def _get_or_create_entry(owner: str, repo: str) -> cache_index.CacheEntry | JSONResponse:
-    """Shared by /rate and /api/rate: resolves the repo, checks the cache
-    and usage cap, and runs the pipeline on a miss. Returns a CacheEntry
-    (pointing at the persisted .json/.md/.pdf files) for the caller to
-    turn into whichever response shape it needs (HTML page or PDF file),
-    or a JSONResponse representing an error to send back immediately."""
     # Resolve the current commit SHA BEFORE touching the cache or spending
     # any Anthropic budget -- a bad repo/owner should fail here, cheaply.
     try:
@@ -161,13 +96,13 @@ async def _get_or_create_entry(owner: str, repo: str) -> cache_index.CacheEntry 
     async with _lock: #With the lock, only one request at a time. VERY important (USeful for funcs touching files)
         entry = cache_index.lookup(owner, repo, sha)
         if entry is not None:
-            return entry
+            return _pdf_response(entry, owner, repo)
 
         if not await usage_cap.check_and_increment():
             return JSONResponse(
                 {
                     "error": "Daily rating limit reached -- try again tomorrow. "
-                    "Already-rated repos are still available via /report/{owner}/{repo}."
+                    "Already-rated repos are still available via /api/report/{owner}/{repo}."
                 },
                 status_code=429,
             )
@@ -182,73 +117,19 @@ async def _get_or_create_entry(owner: str, repo: str) -> cache_index.CacheEntry 
     async with _lock:
         cache_index.record(owner, repo, sha, generated_at, json_path, md_path, pdf_path)
 
-    return cache_index.CacheEntry(
-        owner=owner,
-        repo=repo,
-        sha=sha,
-        generated_at=generated_at,
-        json_path=json_path,
-        md_path=md_path,
-        pdf_path=pdf_path,
+    return _pdf_response(
+        cache_index.CacheEntry(
+            owner=owner,
+            repo=repo,
+            sha=sha,
+            generated_at=generated_at,
+            json_path=json_path,
+            md_path=md_path,
+            pdf_path=pdf_path,
+        ),
+        owner,
+        repo,
     )
-
-
-def _pdf_response(entry: cache_index.CacheEntry, owner: str, repo: str) -> JSONResponse | FileResponse:
-    if entry.pdf_path is None:
-        return JSONResponse(
-            {
-                "error": f"PDF generation failed for this rating of {owner}/{repo}. "
-                f"Try /report/{owner}/{repo} for the HTML view instead."
-            },
-            status_code=500,
-        )
-    return FileResponse(entry.pdf_path, media_type="application/pdf", filename=f"{owner}__{repo}.pdf")
-
-
-async def _parse_rate_body(request: Request) -> tuple[str, str] | JSONResponse:
-    try:
-        body = await request.json()
-    except Exception:
-        return JSONResponse({"error": "Request body must be JSON."}, status_code=400)
-
-    owner = (body.get("owner") or "").strip()
-    repo = (body.get("repo") or "").strip()
-    if not owner or not repo:
-        return JSONResponse({"error": "owner and repo are required"}, status_code=400)
-    return owner, repo
-
-
-async def rate(request: Request) -> JSONResponse | HTMLResponse:
-    parsed = await _parse_rate_body(request)
-    if isinstance(parsed, JSONResponse):
-        return parsed
-    owner, repo = parsed
-
-    result = await _get_or_create_entry(owner, repo)
-    if isinstance(result, JSONResponse):
-        return result
-    return _rating_response(result.load_rating())
-
-
-async def rate_pdf(request: Request) -> JSONResponse | FileResponse:
-    parsed = await _parse_rate_body(request)
-    if isinstance(parsed, JSONResponse):
-        return parsed
-    owner, repo = parsed
-
-    result = await _get_or_create_entry(owner, repo)
-    if isinstance(result, JSONResponse):
-        return result
-    return _pdf_response(result, owner, repo)
-
-
-async def get_report(request: Request) -> JSONResponse | HTMLResponse:
-    owner = request.path_params["owner"]
-    repo = request.path_params["repo"]
-    entry = cache_index.latest_for_repo(owner, repo)
-    if entry is None:
-        return JSONResponse({"error": f"{owner}/{repo} hasn't been rated yet."}, status_code=404)
-    return _rating_response(entry.load_rating())
 
 
 async def get_report_pdf(request: Request) -> JSONResponse | FileResponse:
@@ -268,9 +149,6 @@ async def lifespan(app: Starlette): #Starts up and shuts down the server
 
 app = Starlette(
     routes=[
-        Route("/", home, methods=["GET"]),
-        Route("/rate", rate, methods=["POST"]),
-        Route("/report/{owner}/{repo}", get_report, methods=["GET"]),
         Route("/api/rate", rate_pdf, methods=["POST"]),
         Route("/api/report/{owner}/{repo}", get_report_pdf, methods=["GET"]),
     ],

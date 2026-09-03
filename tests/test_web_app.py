@@ -3,6 +3,10 @@ End-to-end tests for web_app.py's routes, through the real HTTP layer
 (starlette's TestClient), not by calling handler functions directly --
 that's the point of brief test 1.
 
+2026-09-03: web_app.py's browser/HTML routes were removed (app-only now),
+so these tests only exercise /api/rate and /api/report/{owner}/{repo} --
+the two routes that actually still exist.
+
 GitHub reads are free, so test_bad_input_returns_4xx hits the real API for
 a nonexistent repo. Everything that would otherwise call Anthropic
 (rate_repo) is monkeypatched to a canned result -- no API cost.
@@ -87,18 +91,23 @@ def client():
     return TestClient(web_app.app)
 
 
-def test_rate_endpoint_shape(redirect_storage, mock_github, client, monkeypatch):
-    """Brief test 1: a real POST /rate through the actual HTTP layer, not
-    calling rate_repo() directly -- proves the web layer itself works."""
+def test_api_rate_returns_a_real_pdf_file(redirect_storage, mock_github, client, monkeypatch):
+    """Brief test 1 (adapted): a real POST /api/rate through the actual
+    HTTP layer, not calling rate_repo() directly -- proves the web layer
+    itself works, and that it hands back a genuine PDF file."""
 
     async def fake_rate_repo(gh_client, owner, repo):
         return {**CANNED_RAW, "repo": f"{owner}/{repo}"}
 
     monkeypatch.setattr(web_app, "rate_repo", fake_rate_repo)
 
-    resp = client.post("/rate", json={"owner": "someowner", "repo": "somerepo"})
+    resp = client.post("/api/rate", json={"owner": "someowner", "repo": "pdf-test"})
+
     assert resp.status_code == 200
-    assert "someowner/somerepo" in resp.text
+    assert resp.headers["content-type"] == "application/pdf"
+    assert "attachment" in resp.headers["content-disposition"]
+    assert "someowner__pdf-test.pdf" in resp.headers["content-disposition"]
+    assert resp.content[:4] == b"%PDF"  # real PDF file signature, not a stub
 
 
 def test_cache_hit_skips_pipeline(redirect_storage, mock_github, client, monkeypatch):
@@ -113,8 +122,8 @@ def test_cache_hit_skips_pipeline(redirect_storage, mock_github, client, monkeyp
 
     monkeypatch.setattr(web_app, "rate_repo", fake_rate_repo)
 
-    first = client.post("/rate", json={"owner": "someowner", "repo": "cachetest"})
-    second = client.post("/rate", json={"owner": "someowner", "repo": "cachetest"})
+    first = client.post("/api/rate", json={"owner": "someowner", "repo": "cachetest"})
+    second = client.post("/api/rate", json={"owner": "someowner", "repo": "cachetest"})
 
     assert first.status_code == 200
     assert second.status_code == 200
@@ -131,9 +140,9 @@ def test_usage_cap_rejects_over_limit(redirect_storage, mock_github, client, mon
 
     monkeypatch.setattr(web_app, "rate_repo", fake_rate_repo)
 
-    r1 = client.post("/rate", json={"owner": "someowner", "repo": "cap-repo-1"})
-    r2 = client.post("/rate", json={"owner": "someowner", "repo": "cap-repo-2"})
-    r3 = client.post("/rate", json={"owner": "someowner", "repo": "cap-repo-3"})
+    r1 = client.post("/api/rate", json={"owner": "someowner", "repo": "cap-repo-1"})
+    r2 = client.post("/api/rate", json={"owner": "someowner", "repo": "cap-repo-2"})
+    r3 = client.post("/api/rate", json={"owner": "someowner", "repo": "cap-repo-3"})
 
     assert r1.status_code == 200
     assert r2.status_code == 200
@@ -146,7 +155,7 @@ def test_bad_input_returns_4xx(redirect_storage, client):
     """Brief test 5: a real nonexistent repo returns a clear 4xx with a
     plain-language message, not a stack trace. Free GitHub call, not mocked."""
     resp = client.post(
-        "/rate",
+        "/api/rate",
         json={"owner": "this-owner-should-not-exist-xyz", "repo": "this-repo-should-not-exist-xyz"},
     )
     assert resp.status_code == 404
@@ -155,91 +164,27 @@ def test_bad_input_returns_4xx(redirect_storage, client):
 
 
 def test_missing_owner_or_repo_returns_400(redirect_storage, client):
-    resp = client.post("/rate", json={"owner": "", "repo": "somerepo"})
+    resp = client.post("/api/rate", json={"owner": "", "repo": "somerepo"})
     assert resp.status_code == 400
 
 
 def test_get_report_returns_404_when_never_rated(redirect_storage, client):
-    resp = client.get("/report/nobody/never-rated-repo")
-    assert resp.status_code == 404
-    assert "hasn't been rated yet" in resp.json()["error"]
-
-
-def test_get_report_serves_latest_cached_entry(redirect_storage, mock_github, client, monkeypatch):
-    async def fake_rate_repo(gh_client, owner, repo):
-        return {**CANNED_RAW, "repo": f"{owner}/{repo}"}
-
-    monkeypatch.setattr(web_app, "rate_repo", fake_rate_repo)
-
-    client.post("/rate", json={"owner": "someowner", "repo": "get-report-test"})
-
-    resp = client.get("/report/someowner/get-report-test")
-    assert resp.status_code == 200
-    assert "someowner/get-report-test" in resp.text
-
-
-# --- /api/rate and /api/report/{owner}/{repo} -- the PDF-serving routes ---
-
-
-def test_api_rate_returns_a_real_pdf_file(redirect_storage, mock_github, client, monkeypatch):
-    async def fake_rate_repo(gh_client, owner, repo):
-        return {**CANNED_RAW, "repo": f"{owner}/{repo}"}
-
-    monkeypatch.setattr(web_app, "rate_repo", fake_rate_repo)
-
-    resp = client.post("/api/rate", json={"owner": "someowner", "repo": "pdf-test"})
-
-    assert resp.status_code == 200
-    assert resp.headers["content-type"] == "application/pdf"
-    assert "attachment" in resp.headers["content-disposition"]
-    assert "someowner__pdf-test.pdf" in resp.headers["content-disposition"]
-    assert resp.content[:4] == b"%PDF"  # real PDF file signature, not a stub
-
-
-def test_api_rate_and_html_rate_share_the_same_cache(redirect_storage, mock_github, client, monkeypatch):
-    """The whole point of factoring out _get_or_create_entry(): rating via
-    the HTML route, then requesting the PDF route for the same repo,
-    should hit the cache -- not re-run the pipeline a second time."""
-    call_count = 0
-
-    async def fake_rate_repo(gh_client, owner, repo):
-        nonlocal call_count
-        call_count += 1
-        return {**CANNED_RAW, "repo": f"{owner}/{repo}"}
-
-    monkeypatch.setattr(web_app, "rate_repo", fake_rate_repo)
-
-    html_resp = client.post("/rate", json={"owner": "someowner", "repo": "shared-cache-test"})
-    pdf_resp = client.post("/api/rate", json={"owner": "someowner", "repo": "shared-cache-test"})
-
-    assert html_resp.status_code == 200
-    assert pdf_resp.status_code == 200
-    assert pdf_resp.headers["content-type"] == "application/pdf"
-    assert call_count == 1  # only the first request actually ran the pipeline
-
-
-def test_api_get_report_returns_404_when_never_rated(redirect_storage, client):
     resp = client.get("/api/report/nobody/never-rated-repo")
     assert resp.status_code == 404
     assert "hasn't been rated yet" in resp.json()["error"]
 
 
-def test_api_get_report_serves_cached_pdf(redirect_storage, mock_github, client, monkeypatch):
+def test_get_report_serves_cached_pdf(redirect_storage, mock_github, client, monkeypatch):
     async def fake_rate_repo(gh_client, owner, repo):
         return {**CANNED_RAW, "repo": f"{owner}/{repo}"}
 
     monkeypatch.setattr(web_app, "rate_repo", fake_rate_repo)
 
-    client.post("/api/rate", json={"owner": "someowner", "repo": "api-get-report-test"})
+    client.post("/api/rate", json={"owner": "someowner", "repo": "get-report-test"})
 
-    resp = client.get("/api/report/someowner/api-get-report-test")
+    resp = client.get("/api/report/someowner/get-report-test")
     assert resp.status_code == 200
     assert resp.headers["content-type"] == "application/pdf"
-
-
-def test_api_rate_returns_same_errors_as_html_route(redirect_storage, client):
-    resp = client.post("/api/rate", json={"owner": "", "repo": "somerepo"})
-    assert resp.status_code == 400
 
 
 def test_pdf_response_returns_500_when_pdf_generation_failed():
