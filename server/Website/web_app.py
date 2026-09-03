@@ -49,7 +49,7 @@ _gh = GitHubClient(config.GITHUB_TOKEN)
 # Correct for uvicorn's default single-process run; NOT safe across
 # multiple worker processes -- horizontal scaling is explicitly out of
 # scope for this phase (see PHASE7_BRIEF.pdf).
-_lock = asyncio.Lock()
+_lock = asyncio.Lock() #Guarantees only 1 piece of code at a time can be inside a section that touches cache-index/usage files
 
 
 def _rating_response(rating) -> HTMLResponse:
@@ -153,7 +153,7 @@ async def rate(request: Request) -> JSONResponse | HTMLResponse:
             status_code=404,
         )
 
-    async with _lock:
+    async with _lock: #With the lock, only one request at a time. VERY important (USeful for funcs touching files)
         entry = cache_index.lookup(owner, repo, sha)
         if entry is not None:
             return _rating_response(entry.load_rating())
@@ -190,7 +190,7 @@ async def get_report(request: Request) -> JSONResponse | HTMLResponse:
 
 
 @asynccontextmanager
-async def lifespan(app: Starlette):
+async def lifespan(app: Starlette): #Starts up and shuts down the server
     yield
     await _gh.aclose()
 
