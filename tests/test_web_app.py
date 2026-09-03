@@ -15,6 +15,8 @@ reports/ratings/ directory.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 from starlette.testclient import TestClient
 
@@ -174,3 +176,85 @@ def test_get_report_serves_latest_cached_entry(redirect_storage, mock_github, cl
     resp = client.get("/report/someowner/get-report-test")
     assert resp.status_code == 200
     assert "someowner/get-report-test" in resp.text
+
+
+# --- /api/rate and /api/report/{owner}/{repo} -- the PDF-serving routes ---
+
+
+def test_api_rate_returns_a_real_pdf_file(redirect_storage, mock_github, client, monkeypatch):
+    async def fake_rate_repo(gh_client, owner, repo):
+        return {**CANNED_RAW, "repo": f"{owner}/{repo}"}
+
+    monkeypatch.setattr(web_app, "rate_repo", fake_rate_repo)
+
+    resp = client.post("/api/rate", json={"owner": "someowner", "repo": "pdf-test"})
+
+    assert resp.status_code == 200
+    assert resp.headers["content-type"] == "application/pdf"
+    assert "attachment" in resp.headers["content-disposition"]
+    assert "someowner__pdf-test.pdf" in resp.headers["content-disposition"]
+    assert resp.content[:4] == b"%PDF"  # real PDF file signature, not a stub
+
+
+def test_api_rate_and_html_rate_share_the_same_cache(redirect_storage, mock_github, client, monkeypatch):
+    """The whole point of factoring out _get_or_create_entry(): rating via
+    the HTML route, then requesting the PDF route for the same repo,
+    should hit the cache -- not re-run the pipeline a second time."""
+    call_count = 0
+
+    async def fake_rate_repo(gh_client, owner, repo):
+        nonlocal call_count
+        call_count += 1
+        return {**CANNED_RAW, "repo": f"{owner}/{repo}"}
+
+    monkeypatch.setattr(web_app, "rate_repo", fake_rate_repo)
+
+    html_resp = client.post("/rate", json={"owner": "someowner", "repo": "shared-cache-test"})
+    pdf_resp = client.post("/api/rate", json={"owner": "someowner", "repo": "shared-cache-test"})
+
+    assert html_resp.status_code == 200
+    assert pdf_resp.status_code == 200
+    assert pdf_resp.headers["content-type"] == "application/pdf"
+    assert call_count == 1  # only the first request actually ran the pipeline
+
+
+def test_api_get_report_returns_404_when_never_rated(redirect_storage, client):
+    resp = client.get("/api/report/nobody/never-rated-repo")
+    assert resp.status_code == 404
+    assert "hasn't been rated yet" in resp.json()["error"]
+
+
+def test_api_get_report_serves_cached_pdf(redirect_storage, mock_github, client, monkeypatch):
+    async def fake_rate_repo(gh_client, owner, repo):
+        return {**CANNED_RAW, "repo": f"{owner}/{repo}"}
+
+    monkeypatch.setattr(web_app, "rate_repo", fake_rate_repo)
+
+    client.post("/api/rate", json={"owner": "someowner", "repo": "api-get-report-test"})
+
+    resp = client.get("/api/report/someowner/api-get-report-test")
+    assert resp.status_code == 200
+    assert resp.headers["content-type"] == "application/pdf"
+
+
+def test_api_rate_returns_same_errors_as_html_route(redirect_storage, client):
+    resp = client.post("/api/rate", json={"owner": "", "repo": "somerepo"})
+    assert resp.status_code == 400
+
+
+def test_pdf_response_returns_500_when_pdf_generation_failed():
+    """Unit test, no HTTP layer -- _pdf_response() must degrade gracefully
+    (not crash) when pdf_path is None, matching generate_report()'s own
+    graceful PDF-failure handling."""
+    entry = cache_index.CacheEntry(
+        owner="someowner",
+        repo="norender",
+        sha="a" * 40,
+        generated_at="2026-09-03T00:00:00Z",
+        json_path=Path("fake.json"),
+        md_path=Path("fake.md"),
+        pdf_path=None,
+    )
+    resp = web_app._pdf_response(entry, "someowner", "norender")
+    assert resp.status_code == 500
+    assert "PDF generation failed" in resp.body.decode()

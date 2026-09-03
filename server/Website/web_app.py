@@ -17,6 +17,16 @@ Routes:
         count against the daily usage cap)
     GET  /report/{owner}/{repo}             -- most recent cached rating
         for that repo, regardless of SHA
+
+    POST /api/rate {"owner": ..., "repo": ...}  -- same as /rate, but
+        returns the actual PDF file instead of an HTML page. Added for the
+        mobile app, which wants a downloadable file, not a webpage.
+    GET  /api/report/{owner}/{repo}             -- same as /report/..., PDF
+        instead of HTML.
+
+    All 4 rating-related routes share one helper, _get_or_create_entry(),
+    for the resolve/cache/usage-cap/pipeline logic -- only the final
+    "package it as HTML or as a PDF file" step differs between them.
 """
 
 from __future__ import annotations
@@ -27,7 +37,7 @@ from datetime import datetime, timezone
 
 from starlette.applications import Starlette
 from starlette.requests import Request
-from starlette.responses import HTMLResponse, JSONResponse
+from starlette.responses import FileResponse, HTMLResponse, JSONResponse
 from starlette.routing import Route
 
 from server import config
@@ -126,17 +136,12 @@ async def home(request: Request) -> HTMLResponse:
     return HTMLResponse(_HOME_PAGE_HTML)
 
 
-async def rate(request: Request) -> JSONResponse | HTMLResponse:
-    try:
-        body = await request.json()
-    except Exception:
-        return JSONResponse({"error": "Request body must be JSON."}, status_code=400)
-
-    owner = (body.get("owner") or "").strip()
-    repo = (body.get("repo") or "").strip()
-    if not owner or not repo:
-        return JSONResponse({"error": "owner and repo are required"}, status_code=400)
-
+async def _get_or_create_entry(owner: str, repo: str) -> cache_index.CacheEntry | JSONResponse:
+    """Shared by /rate and /api/rate: resolves the repo, checks the cache
+    and usage cap, and runs the pipeline on a miss. Returns a CacheEntry
+    (pointing at the persisted .json/.md/.pdf files) for the caller to
+    turn into whichever response shape it needs (HTML page or PDF file),
+    or a JSONResponse representing an error to send back immediately."""
     # Resolve the current commit SHA BEFORE touching the cache or spending
     # any Anthropic budget -- a bad repo/owner should fail here, cheaply.
     try:
@@ -156,7 +161,7 @@ async def rate(request: Request) -> JSONResponse | HTMLResponse:
     async with _lock: #With the lock, only one request at a time. VERY important (USeful for funcs touching files)
         entry = cache_index.lookup(owner, repo, sha)
         if entry is not None:
-            return _rating_response(entry.load_rating())
+            return entry
 
         if not await usage_cap.check_and_increment():
             return JSONResponse(
@@ -177,7 +182,64 @@ async def rate(request: Request) -> JSONResponse | HTMLResponse:
     async with _lock:
         cache_index.record(owner, repo, sha, generated_at, json_path, md_path, pdf_path)
 
-    return _rating_response(rating)
+    return cache_index.CacheEntry(
+        owner=owner,
+        repo=repo,
+        sha=sha,
+        generated_at=generated_at,
+        json_path=json_path,
+        md_path=md_path,
+        pdf_path=pdf_path,
+    )
+
+
+def _pdf_response(entry: cache_index.CacheEntry, owner: str, repo: str) -> JSONResponse | FileResponse:
+    if entry.pdf_path is None:
+        return JSONResponse(
+            {
+                "error": f"PDF generation failed for this rating of {owner}/{repo}. "
+                f"Try /report/{owner}/{repo} for the HTML view instead."
+            },
+            status_code=500,
+        )
+    return FileResponse(entry.pdf_path, media_type="application/pdf", filename=f"{owner}__{repo}.pdf")
+
+
+async def _parse_rate_body(request: Request) -> tuple[str, str] | JSONResponse:
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Request body must be JSON."}, status_code=400)
+
+    owner = (body.get("owner") or "").strip()
+    repo = (body.get("repo") or "").strip()
+    if not owner or not repo:
+        return JSONResponse({"error": "owner and repo are required"}, status_code=400)
+    return owner, repo
+
+
+async def rate(request: Request) -> JSONResponse | HTMLResponse:
+    parsed = await _parse_rate_body(request)
+    if isinstance(parsed, JSONResponse):
+        return parsed
+    owner, repo = parsed
+
+    result = await _get_or_create_entry(owner, repo)
+    if isinstance(result, JSONResponse):
+        return result
+    return _rating_response(result.load_rating())
+
+
+async def rate_pdf(request: Request) -> JSONResponse | FileResponse:
+    parsed = await _parse_rate_body(request)
+    if isinstance(parsed, JSONResponse):
+        return parsed
+    owner, repo = parsed
+
+    result = await _get_or_create_entry(owner, repo)
+    if isinstance(result, JSONResponse):
+        return result
+    return _pdf_response(result, owner, repo)
 
 
 async def get_report(request: Request) -> JSONResponse | HTMLResponse:
@@ -187,6 +249,15 @@ async def get_report(request: Request) -> JSONResponse | HTMLResponse:
     if entry is None:
         return JSONResponse({"error": f"{owner}/{repo} hasn't been rated yet."}, status_code=404)
     return _rating_response(entry.load_rating())
+
+
+async def get_report_pdf(request: Request) -> JSONResponse | FileResponse:
+    owner = request.path_params["owner"]
+    repo = request.path_params["repo"]
+    entry = cache_index.latest_for_repo(owner, repo)
+    if entry is None:
+        return JSONResponse({"error": f"{owner}/{repo} hasn't been rated yet."}, status_code=404)
+    return _pdf_response(entry, owner, repo)
 
 
 @asynccontextmanager
@@ -200,6 +271,8 @@ app = Starlette(
         Route("/", home, methods=["GET"]),
         Route("/rate", rate, methods=["POST"]),
         Route("/report/{owner}/{repo}", get_report, methods=["GET"]),
+        Route("/api/rate", rate_pdf, methods=["POST"]),
+        Route("/api/report/{owner}/{repo}", get_report_pdf, methods=["GET"]),
     ],
     lifespan=lifespan,
 )
