@@ -1,6 +1,6 @@
 {
   "expo": {
-    "name": "Github-Repo-Analyzer",
+    "name": "RepoReview",
     "slug": "github-repo-analyzer",
     "version": "1.0.0",
     "orientation": "portrait",
@@ -12,9 +12,8 @@
     "android": {
       "package": "com.limelizard3.githubrepoanalyzer",
       "adaptiveIcon": {
-        "backgroundColor": "#E6F4FE",
+        "backgroundColor": "#0b0f1a",
         "foregroundImage": "./assets/android-icon-foreground.png",
-        "backgroundImage": "./assets/android-icon-background.png",
         "monochromeImage": "./assets/android-icon-monochrome.png"
       },
       "predictiveBackGestureEnabled": false
