@@ -1,50 +1,123 @@
-# github-repo-rater — MCP server (Phase 1)
+# github-repo-rater
 
-Custom MCP server exposing 5 read-only GitHub tools over Streamable HTTP,
-built for a CCAR-F practice project (see `plan.md` in the project for the
-full architecture). Auth is a single static bearer token — this server
-has exactly one intended client (the coordinator agent / website
-backend), so full OAuth 2.1 wasn't warranted; see comments in
-`server/auth.py` for the reasoning.
+Rates a public GitHub repo across three dimensions — Architecture,
+Results/Functionality, and Design/Docs — using three concurrent Claude
+subagents, then produces a JSON/Markdown/PDF report. Available two ways:
+a one-shot CLI, and a small HTTP backend + companion mobile app for
+triggering a rating from a phone.
 
-## Setup
+**Note on `server/app.py`:** an earlier MCP server, now **inactive**. The
+CLI and website both call `GitHubClient` directly — the MCP hop was never
+part of the real pipeline. `app.py`/`auth.py` stay in the repo but aren't
+used by anything below.
+
+## How a rating actually happens
+
+```
+triage.py            -- picks a representative sample of files from the repo
+  -> coordinator.py   -- runs the 3 rating subagents concurrently, blends
+                          their scores into one quality_score
+  -> report_writer.py -- validates the result, writes .json/.md/.pdf
+```
+
+The three subagents (`server/Subagents/`) each score independently:
+**Architecture** (structure, naming, separation of concerns),
+**Results/Functionality** (does the code do what it claims, via static
+reading only — no code execution), and **Design/Docs** (completeness of
+README/docs). A fourth subagent, **Recommendations**, writes suggestions
+into the report but never affects the score. Full deduction rules and
+score anchors for all three graded dimensions: see
+`grading_rubric.pdf` (generated — ask for a fresh copy if the rubric in
+the subagent files has since changed).
+
+## Setup — backend
 
 ```bash
 pip install -r requirements.txt
 cp .env.example .env
-# fill in GITHUB_TOKEN (a GitHub PAT — see .env.example for where to get one)
-# and MCP_API_KEY (any long random string)
-python3 -m server.app
+# fill in GITHUB_TOKEN (a GitHub PAT) and ANTHROPIC_API_KEY
 ```
 
-Server listens on `http://<HOST>:<PORT>/mcp` (defaults `0.0.0.0:8000`).
-Every request must include `Authorization: Bearer <MCP_API_KEY>`.
+**Run a single rating from the CLI:**
+```bash
+python -m server.Report_Writing.generate_report <owner> <repo>
+```
+Writes `.json`/`.md`/`.pdf` to `reports/ratings/`.
 
-## Tools
+**Run the website backend** (what the mobile app talks to):
+```bash
+python -m server.Website.web_app
+```
+Listens on `http://<HOST>:<PORT>` (default `0.0.0.0:8000`).
 
-| Tool | Purpose |
+| Route | Purpose |
 |---|---|
-| `get_repo_metadata(owner, repo)` | Description, default branch, language, size, stars, license. Call first. |
-| `list_repo_tree(owner, repo, ref=None)` | Full recursive file/dir listing in one call — use for context triage before fetching content. |
-| `get_file_content(owner, repo, path, ref=None)` | Decoded text of one file. Files >1MB unsupported in v1. |
-| `get_readme(owner, repo, ref=None)` | Decoded root README. Errors if none exists — that's a real signal, not a bug. |
-| `search_code(owner, repo, query)` | Code search within the repo. Rate-limited to 10 req/min — use sparingly. |
+| `POST /api/rate` `{"owner": ..., "repo": ...}` | Rate a repo (cached by `owner+repo+commit SHA` — a repeat request for an unchanged repo costs nothing and doesn't count against the daily cap). Returns the PDF file directly. |
+| `GET /api/report/{owner}/{repo}` | Most recent cached rating's PDF for that repo, regardless of commit. |
 
-## Known limitations (by design, for v1)
+A daily rating cap (`server/Website/usage_cap.py`) protects the
+Anthropic budget behind this server's own credentials, since this is a
+public-facing endpoint with no per-user auth.
 
-- Static analysis only — no code execution, so "does it run" is inferred, not verified.
-- Files over ~1MB via `get_file_content` aren't supported (Contents API limit).
-- `GITHUB_TOKEN` is a personal PAT for now. Swap for a GitHub App installation
-  token before this is public-facing (better quota, scoped/revocable independent
-  of your personal account).
-- No result caching yet (planned for Phase 7, keyed by repo+commit SHA).
+**Run the tests:**
+```bash
+python -m pytest tests/
+```
 
-## Verified working
+## Setup — mobile app
 
-- `python3 -m py_compile` passes on all files.
-- All 5 tools register with correct schemas (`mcp.list_tools()`).
-- Live HTTP check: missing/wrong bearer token → 401; correct token → 200
-  with a valid MCP `initialize` handshake response.
+A small Expo/React Native app (`mobile-app/`) — an owner/repo input, a
+Rate button, and a share sheet for the resulting PDF. It talks to
+whatever backend `API_BASE_URL` in `mobile-app/App.tsx` points at.
 
-Not yet tested against a real GitHub repo (needs a real `GITHUB_TOKEN` —
-the checks above used a dummy token and never called the GitHub API).
+```bash
+cd mobile-app
+npm install
+npx expo start        # live preview via the Expo Go app, or:
+npx eas-cli build --platform android --profile preview   # standalone .apk
+```
+
+Since a phone can't reach `localhost` on your computer, `API_BASE_URL`
+needs a real reachable address for the backend. A raw LAN IP breaks
+every time the computer changes networks (campus wifi vs. hotspot vs.
+home wifi all assign a different one) — a tunnel (e.g. ngrok, with a
+free static domain) avoids that instability. See the comment above
+`API_BASE_URL` in `App.tsx` for the current value and reasoning.
+
+## Known limitations (by design, for now)
+
+- Static analysis only for Results/Functionality — no code execution,
+  so "does it run" is inferred from reading, not verified.
+- `GITHUB_TOKEN` is a personal PAT — fine at this scale; a GitHub App
+  installation token would be the upgrade for real public traffic.
+- No horizontal scaling — the website assumes a single `uvicorn`
+  process; the file-backed cache index and usage cap aren't safe across
+  multiple worker processes.
+- No user accounts — the website is fully public and anonymous, gated
+  only by the shared daily usage cap.
+- The mobile app's backend address is currently a personal ngrok
+  tunnel + a laptop that has to be on and running the server — not a
+  hosted, always-available backend yet.
+
+## Project layout
+
+```
+server/
+  coordinator.py          -- runs the 3 subagents, blends quality_score
+  triage.py                -- picks which files each subagent sees
+  github_client.py         -- GitHub REST API wrapper
+  anthropic_client.py      -- shared Anthropic client + prompt-caching helper
+  Subagents/                -- architecture / results / docs / recommendations
+  Report_Writing/
+    generate_report.py     -- CLI entry point
+    report_writer.py       -- JSON/Markdown/PDF rendering
+    report_schema.py       -- RepoRating pydantic schema
+  Website/
+    web_app.py              -- Starlette app, /api/rate + /api/report routes
+    cache_index.py           -- (owner, repo, sha) -> cached rating lookup
+    usage_cap.py              -- daily rating limit
+  app.py, auth.py            -- inactive Phase 1 MCP server, unused
+mobile-app/                  -- Expo/React Native client
+tests/                        -- pytest suite
+reports/ratings/               -- generated reports + cache/usage-cap state
+```
