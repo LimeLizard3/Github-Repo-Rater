@@ -16,6 +16,7 @@ the markdown text. No second parallel content template was introduced.
 
 from __future__ import annotations
 
+import base64
 import re
 import subprocess
 import tempfile
@@ -28,6 +29,7 @@ import markdown as markdown_lib
 from server.Report_Writing.report_schema import DimensionStatus, RepoRating
 
 REPORTS_DIR = Path("reports/ratings")
+_LOGO_PATH = Path(__file__).parent / "assets" / "logo.png"
 
 # Hardcoded to the standard Windows install location -- this project runs
 # locally on Windows only for now. Revisit if this ever needs to run
@@ -60,12 +62,38 @@ def _strip_garbled_artifacts(text: str) -> str:
     return re.sub(r" {2,}", " ", text)
 
 
+_ITEM_TAG_PATTERN = re.compile(r"<item>(.*?)</item>", re.DOTALL)
+
+
+def _coerce_str_list(value: Any) -> list[str]:
+    """Defends against a subagent occasionally returning strengths/weaknesses
+    as one glued-together string (sometimes with pseudo <item> tags) instead
+    of a real JSON array. Iterating a bare string with a plain `for s in
+    value` walks it character-by-character -- Python strings are iterable at
+    the character level -- producing hundreds of single-character "items"
+    that Pydantic happily accepts (each character IS a valid str on its
+    own). That corruption already reached a real generated report, ballooning
+    it to 150 pages / ~3MB, slow enough on mobile data to look like a hang.
+
+    If we get a string, first try to recover the real intended items from
+    any <item>...</item> wrapping (the shape the model seems to reach for
+    when it collapses an array into a string); otherwise treat the whole
+    string as a single item rather than shredding it into characters.
+    """
+    if isinstance(value, list):
+        return value
+    if isinstance(value, str):
+        items = _ITEM_TAG_PATTERN.findall(value)
+        return items if items else [value]
+    return []
+
+
 def _sanitize_dimension(dim: dict[str, Any]) -> None:
     if dim.get("justification"):
         dim["justification"] = _strip_garbled_artifacts(dim["justification"])
     for key in ("strengths", "weaknesses"):
         if dim.get(key):
-            dim[key] = [_strip_garbled_artifacts(s) for s in dim[key]]
+            dim[key] = [_strip_garbled_artifacts(s) for s in _coerce_str_list(dim[key])]
     if dim.get("issues_found"):
         for issue in dim["issues_found"]:
             issue["description"] = _strip_garbled_artifacts(issue["description"])
@@ -80,7 +108,7 @@ def _sanitize_raw(raw: dict[str, Any]) -> dict[str, Any]:
             _sanitize_dimension(dim)
     for key in ("strengths", "weaknesses"):
         if raw.get(key):
-            raw[key] = [_strip_garbled_artifacts(s) for s in raw[key]]
+            raw[key] = [_strip_garbled_artifacts(s) for s in _coerce_str_list(raw[key])]
     return raw
 
 
@@ -146,6 +174,23 @@ def render_markdown(rating: RepoRating) -> str:
             failed.append("Results/Functionality")
         reason = " and ".join(failed) if failed else "a required dimension"
         lines.append(f"**Quality score:** N/A ({reason} unavailable)")
+    lines.append("")
+
+    lines.append("## Popularity:")
+    lines.append("")
+    p = rating.popularity
+    if p.status == DimensionStatus.FAILED:
+        lines.append(f"**Not available** — {_escape_markdown(p.error or '')}")
+    else:
+        lines.append("_Informational only — does not affect Quality Score._")
+        lines.append("")
+        lines.append(f"- **Stars:** {p.stars:,}" if p.stars is not None else "- **Stars:** unknown")
+        lines.append(f"- **Forks:** {p.forks:,}" if p.forks is not None else "- **Forks:** unknown")
+        lines.append(f"- **Watchers:** {p.watchers:,}" if p.watchers is not None else "- **Watchers:** unknown")
+        if p.has_releases:
+            lines.append(f"- **Release downloads:** {p.release_downloads:,}")
+        else:
+            lines.append("- **Release downloads:** no releases published")
     lines.append("")
 
     lines.append("## Architecture:")
@@ -230,6 +275,20 @@ _DIMENSION_BADGE_CLASSES = {
 
 _NOT_AVAILABLE_PATTERN = re.compile(r"<p><strong>Not available</strong>.*?</p>", re.DOTALL)
 
+# Wraps the Popularity section's own content (between its <h2> and the next
+# one) in a distinct box -- keeps it visually separate from the 3 graded
+# dimensions below it, since it's informational only and never scored.
+_POPULARITY_SECTION_PATTERN = re.compile(
+    r"<h2>Popularity:?</h2>\s*(.*?)(?=<h2>|\Z)", re.DOTALL
+)
+
+
+def _wrap_popularity_section(body_html: str) -> str:
+    def repl(match: re.Match[str]) -> str:
+        return f'<div class="popularity-box"><h3>Popularity</h3>{match.group(1)}</div>'
+
+    return _POPULARITY_SECTION_PATTERN.sub(repl, body_html, count=1)
+
 # The markdown source's "# repo" title and "**Quality score:** ..." line
 # are still needed in the .md file, but they'd render a second time right
 # below the styled header bar in the HTML/PDF, which already shows both --
@@ -283,6 +342,21 @@ def _format_generated_at(generated_at: str) -> str:
         return generated_at
 
 
+def _logo_data_uri() -> str | None:
+    """Base64-embeds the app icon directly into the HTML so the cover page
+    doesn't depend on an external file existing at render time -- same
+    reasoning web pages sometimes inline small images as data URIs.
+    Returns None (cover page omits the logo entirely) if the asset is
+    missing, rather than letting a missing decorative image break report
+    generation -- same graceful-degradation spirit as CHROME_PATH being
+    checked lazily in render_pdf() instead of at import time."""
+    try:
+        data = _LOGO_PATH.read_bytes()
+    except FileNotFoundError:
+        return None
+    return "data:image/png;base64," + base64.b64encode(data).decode("ascii")
+
+
 _STYLE = """
 <style>
 :root {
@@ -298,14 +372,23 @@ _STYLE = """
   @bottom-center {
     content: "GitHub Repo-Rater  \\2022  Page " counter(page) " of " counter(pages);
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-    font-size: 8px; color: #8a93a6;
+    font-size: 10px; font-weight: 500; letter-spacing: 0.01em; color: #6b7690;
   }
 }
-/* No footer on the cover page -- the base footer's gray text would be
-   unreadable against the navy background, and the cover already states
-   the report's identity on its own. */
-@page cover { margin: 0; }
+/* Cover page gets its own footer, not the base one -- the base footer's
+   gray text would be unreadable against the navy background, so this
+   repeats just the page number in a light color that reads on navy. */
+@page cover {
+  margin: 0 0 1.4cm 0;
+  background: var(--navy);
+  @bottom-center {
+    content: "Page " counter(page) " of " counter(pages);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    font-size: 10px; font-weight: 500; letter-spacing: 0.01em; color: #b7c4e0;
+  }
+}
 
+html, body { height: 100%; }
 body {
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
   margin: 0; color: var(--text); line-height: 1.55; background: #fff;
@@ -314,14 +397,39 @@ body {
   page: cover;
   break-after: page; page-break-after: always;
   background: var(--navy); color: #fff;
-  min-height: 100vh; padding: 3.5em 3em;
-  display: flex; flex-direction: column; justify-content: center; align-items: flex-start;
+  /* 100% (of the page's own content box) instead of 100vh -- vh measures
+     against the wrong box once the cover page has a nonzero margin
+     (needed for its footer), leaving a gap of unstyled white space
+     between this div and the actual page edge. */
+  min-height: 100%; padding: 3.6em 3.4em 3em;
+  display: flex; flex-direction: column; justify-content: space-between;
+  position: relative; overflow: hidden;
 }
-.cover-eyebrow { font-size: 0.85em; text-transform: uppercase; letter-spacing: 0.12em; color: #8fa0c7; margin-bottom: 1.1em; }
-.cover-title { font-size: 2.3em; font-weight: 700; margin: 0 0 1.3em; word-break: break-word; max-width: 14em; }
-.cover-score-block { margin-bottom: 1.6em; }
-.cover-score-block .qs-badge { font-size: 1.8em; padding: 0.35em 1em; }
-.cover-generated { color: #d7deee; font-size: 1.05em; margin-bottom: 2.2em; }
+/* A large, soft, off-canvas glow in the app's own brand gradient (teal to
+   blue, matching the logo) -- fills what would otherwise be a big empty
+   navy void with something intentional instead of more text. */
+.cover-page::before {
+  content: ""; position: absolute; top: -260px; right: -260px;
+  width: 780px; height: 780px; border-radius: 50%; pointer-events: none;
+  background: radial-gradient(circle, rgba(45,212,191,0.26) 0%, rgba(59,130,246,0.17) 42%, rgba(22,33,62,0) 70%);
+}
+/* Smaller, mirrored glow bottom-left -- bookends the page so both empty
+   bands (above and below the hero text) get some visual weight instead
+   of just one corner being treated. */
+.cover-page::after {
+  content: ""; position: absolute; bottom: -220px; left: -220px;
+  width: 520px; height: 520px; border-radius: 50%; pointer-events: none;
+  background: radial-gradient(circle, rgba(59,130,246,0.16) 0%, rgba(45,212,191,0.10) 45%, rgba(22,33,62,0) 72%);
+}
+.cover-header { display: flex; align-items: center; gap: 0.85em; position: relative; z-index: 1; }
+.cover-logo { width: 46px; height: 46px; border-radius: 11px; display: block; }
+.cover-eyebrow { font-size: 0.85em; text-transform: uppercase; letter-spacing: 0.12em; color: #8fa0c7; margin: 0; }
+.cover-hero { position: relative; z-index: 1; }
+.cover-title { font-size: 2.75em; font-weight: 700; margin: 0 0 1em; word-break: break-word; max-width: 12em; line-height: 1.15; }
+.cover-title-rule { width: 68px; height: 4px; border-radius: 2px; margin-bottom: 1.5em; background: linear-gradient(90deg, #2dd4bf, #3b82f6); }
+.cover-score-block .qs-badge { font-size: 2.1em; padding: 0.4em 1.15em; }
+.cover-footer-meta { position: relative; z-index: 1; }
+.cover-generated { color: #d7deee; font-size: 1.05em; margin-bottom: 0.5em; }
 .cover-methodology { color: #8fa0c7; font-size: 0.85em; max-width: 22em; }
 .meta-label { font-size: 0.72em; text-transform: uppercase; letter-spacing: 0.06em; color: #8fa0c7; margin-bottom: 0.35em; }
 .report-body { padding: 1.8em 2.2em 2.5em; max-width: 54em; }
@@ -329,6 +437,17 @@ h2 { color: var(--navy); border-bottom: 2px solid var(--accent); padding-bottom:
 p { color: var(--text); }
 li { margin-bottom: 0.75em; }
 strong { color: var(--navy); }
+.popularity-box {
+  background: #f7f9fc; border: 1px solid #dbe3f0; border-radius: 10px;
+  padding: 1.1em 1.4em; margin: 1.2em 0 1.6em;
+}
+.popularity-box h3 {
+  margin: 0 0 0.6em; color: var(--text-muted); text-transform: uppercase;
+  letter-spacing: 0.06em; font-size: 0.78em;
+}
+.popularity-box p { margin: 0 0 0.6em; color: var(--text-muted); font-style: italic; font-size: 0.9em; }
+.popularity-box ul { margin: 0; padding-left: 1.3em; }
+.popularity-box li { margin-bottom: 0.35em; }
 .badge {
   display: inline-block; padding: 0.15em 0.6em; border-radius: 3px;
   font-size: 0.78em; font-weight: 700; letter-spacing: 0.02em; margin-right: 0.4em;
@@ -354,17 +473,28 @@ strong { color: var(--navy); }
 def render_html(markdown_text: str, title: str, quality_score: float | None, generated_at: str) -> str:
     body = markdown_lib.markdown(markdown_text)
     body = _strip_redundant_header_lines(body)
+    body = _wrap_popularity_section(body)
     body = _apply_badges(body)
+    logo_uri = _logo_data_uri()
+    logo_img = f'<img class="cover-logo" src="{logo_uri}" alt="" />' if logo_uri else ""
     cover_page = (
         '<div class="cover-page">'
+        '<div class="cover-header">'
+        f"{logo_img}"
         '<div class="cover-eyebrow">GitHub Repo-Rater</div>'
+        "</div>"
+        '<div class="cover-hero">'
         f"<h1 class=\"cover-title\">{title}</h1>"
+        '<div class="cover-title-rule"></div>'
         '<div class="cover-score-block">'
         '<div class="meta-label">Quality Score</div>'
         f"<div>{_quality_score_badge(quality_score)}</div>"
         "</div>"
+        "</div>"
+        '<div class="cover-footer-meta">'
         f'<div class="cover-generated">Generated {_format_generated_at(generated_at)}</div>'
         '<div class="cover-methodology">Rated across Architecture, Results/Functionality, and Design/Docs</div>'
+        "</div>"
         "</div>"
     )
     return (

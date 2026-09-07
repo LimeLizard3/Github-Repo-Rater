@@ -8,8 +8,10 @@ from __future__ import annotations
 
 from server.Report_Writing.report_writer import (
     _apply_badges,
+    _coerce_str_list,
     _format_generated_at,
     _quality_score_badge,
+    _sanitize_dimension,
     _strip_garbled_artifacts,
     _strip_redundant_header_lines,
     render_html,
@@ -162,3 +164,42 @@ def test_render_html_has_no_duplicate_title_or_quality_score():
     assert "qs-badge" in html
     assert "cover-page" in html
     assert "August 31, 2026" in html
+
+
+# --- _coerce_str_list / _sanitize_dimension --------------------------------
+# Regression coverage for a real corruption: a subagent returned
+# strengths/weaknesses as one glued string instead of a JSON array, which
+# `for s in dim[key]` walked character-by-character (strings are iterable at
+# the character level) -- 840 single-character "strengths" made it all the
+# way into a real generated report, ballooning it to 150 pages / ~3MB.
+
+
+def test_coerce_str_list_passes_through_a_real_list_untouched():
+    assert _coerce_str_list(["already fine", "still fine"]) == ["already fine", "still fine"]
+
+
+def test_coerce_str_list_recovers_items_from_item_tags():
+    glued = "<item>first strength</item><item>second strength</item>"
+    assert _coerce_str_list(glued) == ["first strength", "second strength"]
+
+
+def test_coerce_str_list_treats_a_bare_string_as_one_item_not_characters():
+    assert _coerce_str_list("just one glued sentence") == ["just one glued sentence"]
+
+
+def test_coerce_str_list_empty_or_missing_value_yields_empty_list():
+    assert _coerce_str_list(None) == []
+    assert _coerce_str_list("") == [""]  # falsy but still a string -- caller guards on truthiness first
+
+
+def test_sanitize_dimension_recovers_glued_strengths_string():
+    dim = {"strengths": "<item>real strength one</item><item>real strength two</item>"}
+    _sanitize_dimension(dim)
+    assert dim["strengths"] == ["real strength one", "real strength two"]
+
+
+def test_sanitize_dimension_never_shreds_a_string_into_characters():
+    dim = {"weaknesses": "no tags here, just a sentence"}
+    _sanitize_dimension(dim)
+    assert dim["weaknesses"] == ["no tags here, just a sentence"]
+    assert len(dim["weaknesses"]) == 1  # the historical bug: this used to be len() == len(the string)

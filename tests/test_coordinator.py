@@ -20,6 +20,7 @@ from __future__ import annotations
 from server.coordinator import (
     _aggregate_strengths_weaknesses,
     _build_dimension_summary,
+    _coerce_str_list,
     _compute_quality_score,
     _compute_results_score,
 )
@@ -199,3 +200,51 @@ def test_summary_marks_failed_or_absent_dimensions():
 
     assert "Architecture: not available" in summary
     assert "Design/Docs: not available" in summary
+
+
+# --- _coerce_str_list --------------------------------------------------
+# Regression coverage for a real corruption: a subagent returned
+# strengths/weaknesses as one glued string instead of a JSON array. Both
+# `for s in dim["strengths"]` (here) and `'; '.join(dim["strengths"])` (in
+# _build_dimension_summary) walk a bare string character-by-character --
+# strings are iterable at the character level -- which is exactly how 840
+# single-character "strengths" made it into a real generated report,
+# ballooning it to 150 pages / ~3MB before this fix.
+
+
+def test_coerce_str_list_passes_through_a_real_list_untouched():
+    assert _coerce_str_list(["already fine", "still fine"]) == ["already fine", "still fine"]
+
+
+def test_coerce_str_list_recovers_items_from_item_tags():
+    glued = "<item>first strength</item><item>second strength</item>"
+    assert _coerce_str_list(glued) == ["first strength", "second strength"]
+
+
+def test_coerce_str_list_treats_a_bare_string_as_one_item_not_characters():
+    assert _coerce_str_list("just one glued sentence") == ["just one glued sentence"]
+
+
+def test_aggregate_never_shreds_a_glued_strengths_string_into_characters():
+    arch = _dim_ok(
+        score=8,
+        justification="x",
+        strengths="<item>real strength one</item><item>real strength two</item>",
+        weaknesses=[],
+    )
+    results = _dim_ok(score=7, justification="x", issues_found=[], strengths=[], weaknesses=[])
+    docs = _dim_ok(present=False)
+
+    strengths, _ = _aggregate_strengths_weaknesses(arch, results, docs)
+
+    assert strengths == ["[Architecture] real strength one", "[Architecture] real strength two"]
+
+
+def test_summary_never_shreds_a_glued_strengths_string_into_characters():
+    arch = _dim_ok(score=8, justification="x", strengths="no tags here, just a sentence", weaknesses=[])
+    results = _dim_ok(score=7, justification="x", issues_found=[])
+    docs = _dim_ok(present=False)
+
+    summary = _build_dimension_summary(arch, results, docs)
+
+    assert "Strengths: no tags here, just a sentence" in summary

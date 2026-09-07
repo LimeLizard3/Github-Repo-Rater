@@ -46,6 +46,7 @@ this project's own real run data before implementing:
 from __future__ import annotations
 
 import asyncio
+import re
 from typing import Any
 
 from server.github_client import GitHubAPIError, GitHubClient
@@ -129,6 +130,37 @@ def _compute_quality_score(
     return min(_DOCS_ABSENT_CAP, ((arch_score + results_score) / 2) * _DOCS_ABSENT_MULTIPLIER)
 
 
+_ITEM_TAG_PATTERN = re.compile(r"<item>(.*?)</item>", re.DOTALL)
+
+
+def _coerce_str_list(value: Any) -> list[str]:
+    """Same defect, same fix as report_writer.py's _coerce_str_list (kept
+    local here rather than imported -- this module sits upstream of
+    report_writer in the pipeline, importing the other way would be
+    backwards). A subagent occasionally returns strengths/weaknesses as one
+    glued string instead of a real JSON array; `for s in dim["strengths"]`
+    below would otherwise walk that string character-by-character (strings
+    are iterable at the character level), and this runs BEFORE
+    report_writer.py ever gets a chance to sanitize anything -- this is the
+    earliest point the corruption can be caught.
+
+    Deliberately identical logic to report_writer.py's version (recover
+    <item>-wrapped items if present, else treat the whole string as one
+    item), not just "make it a 1-element list" -- if this ran first and
+    produced a 1-element list, report_writer.py's own version would see an
+    already-a-list value and never get a chance to split out the <item> tags
+    itself, silently losing the recovery. Identical logic means whichever
+    copy runs first already produces the fully-correct result, and the
+    other is a no-op pass-through. [[results-subagent-garbled-justification-text]]
+    """
+    if isinstance(value, list):
+        return value
+    if isinstance(value, str):
+        items = _ITEM_TAG_PATTERN.findall(value)
+        return items if items else [value]
+    return []
+
+
 def _aggregate_strengths_weaknesses(
     architecture: dict[str, Any],
     results_functionality: dict[str, Any],
@@ -137,14 +169,18 @@ def _aggregate_strengths_weaknesses(
     strengths: list[str] = []
     weaknesses: list[str] = []
     if architecture["status"] == "ok":
-        strengths += [f"[Architecture] {s}" for s in architecture["strengths"]]
-        weaknesses += [f"[Architecture] {w}" for w in architecture["weaknesses"]]
+        strengths += [f"[Architecture] {s}" for s in _coerce_str_list(architecture["strengths"])]
+        weaknesses += [f"[Architecture] {w}" for w in _coerce_str_list(architecture["weaknesses"])]
     if results_functionality["status"] == "ok":
-        strengths += [f"[Results/Functionality] {s}" for s in results_functionality["strengths"]]
-        weaknesses += [f"[Results/Functionality] {w}" for w in results_functionality["weaknesses"]]
+        strengths += [
+            f"[Results/Functionality] {s}" for s in _coerce_str_list(results_functionality["strengths"])
+        ]
+        weaknesses += [
+            f"[Results/Functionality] {w}" for w in _coerce_str_list(results_functionality["weaknesses"])
+        ]
     if documentation["status"] == "ok" and documentation["present"]:
-        strengths += [f"[Design/Docs] {s}" for s in documentation["strengths"]]
-        weaknesses += [f"[Design/Docs] {w}" for w in documentation["weaknesses"]]
+        strengths += [f"[Design/Docs] {s}" for s in _coerce_str_list(documentation["strengths"])]
+        weaknesses += [f"[Design/Docs] {w}" for w in _coerce_str_list(documentation["weaknesses"])]
     return strengths, weaknesses
 
 
@@ -161,8 +197,8 @@ def _build_dimension_summary(
     if architecture["status"] == "ok":
         sections.append(
             f"Architecture (score {architecture['score']}/10): {architecture['justification']}\n"
-            f"Strengths: {'; '.join(architecture['strengths'])}\n"
-            f"Weaknesses: {'; '.join(architecture['weaknesses'])}"
+            f"Strengths: {'; '.join(_coerce_str_list(architecture['strengths']))}\n"
+            f"Weaknesses: {'; '.join(_coerce_str_list(architecture['weaknesses']))}"
         )
     else:
         sections.append("Architecture: not available")
@@ -182,8 +218,8 @@ def _build_dimension_summary(
         sections.append(
             f"Design/Docs (completeness {documentation['completeness']}/10): "
             f"{documentation['justification']}\n"
-            f"Strengths: {'; '.join(documentation['strengths'])}\n"
-            f"Weaknesses: {'; '.join(documentation['weaknesses'])}"
+            f"Strengths: {'; '.join(_coerce_str_list(documentation['strengths']))}\n"
+            f"Weaknesses: {'; '.join(_coerce_str_list(documentation['weaknesses']))}"
         )
     else:
         sections.append("Design/Docs: not available or no documentation present")
@@ -207,6 +243,33 @@ async def _fetch_plan_files(
 
 async def rate_repo(client: GitHubClient, owner: str, repo: str) -> dict[str, Any]:
     repo_map = await build_repo_map(client, owner, repo)
+
+    # stars/forks/watchers come free from the metadata build_repo_map already
+    # fetched -- release_downloads needs one more call, wrapped separately
+    # so a failure there degrades gracefully instead of sinking the whole
+    # rating (same philosophy as the other 3 dimensions' failure handling).
+    stars = repo_map.metadata.get("stargazers_count")
+    forks = repo_map.metadata.get("forks_count")
+    watchers = repo_map.metadata.get("subscribers_count")
+    try:
+        release_downloads = await client.get_release_downloads(owner, repo)
+        popularity: dict[str, Any] = {
+            "status": "ok",
+            "stars": stars,
+            "forks": forks,
+            "watchers": watchers,
+            "has_releases": release_downloads is not None,
+            "release_downloads": release_downloads,
+        }
+    except Exception as e:
+        popularity = {
+            "status": "failed",
+            "error": str(e),
+            "stars": stars,
+            "forks": forks,
+            "watchers": watchers,
+        }
+
     plans = {
         "architecture": select_architecture_files(repo_map),
         "results_functionality": select_results_files(repo_map),
@@ -290,6 +353,7 @@ async def rate_repo(client: GitHubClient, owner: str, repo: str) -> dict[str, An
         "results_functionality": results_functionality,
         "documentation": documentation,
         "recommendations": recommendations,
+        "popularity": popularity,
         "strengths": strengths,
         "weaknesses": weaknesses,
     }

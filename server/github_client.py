@@ -72,12 +72,34 @@ class GitHubClient:
             "primary_language": data.get("language"),
             "size_kb": data["size"],
             "stargazers_count": data["stargazers_count"],
+            "forks_count": data["forks_count"],
+            "subscribers_count": data.get("subscribers_count", 0),
             "license": (data.get("license") or {}).get("spdx_id"),
             "topics": data.get("topics", []),
             "created_at": data["created_at"],
             "pushed_at": data["pushed_at"],
             "archived": data.get("archived", False),
         }
+
+    async def get_release_downloads(self, owner: str, repo: str) -> int | None:
+        """Total download count across all Release assets, or None if the
+        repo has never published a Release. Unlike clone/traffic stats
+        (owner-only), this is public for any repo.
+
+        Only sums the first page (up to 100 releases) rather than paginating
+        fully -- a good-enough approximation for a "how popular is this"
+        stat; a repo with more releases than that is rare, and this isn't
+        the kind of number that needs to be exact.
+        """
+        resp = await self._request(
+            "GET", f"/repos/{owner}/{repo}/releases", params={"per_page": 100}
+        )
+        releases = resp.json()
+        if not releases:
+            return None
+        return sum(
+            asset["download_count"] for release in releases for asset in release.get("assets", [])
+        )
 
     async def _resolve_ref(self, owner: str, repo: str, ref: str | None) -> str: #Gives default branch incase one was not provided
         if ref:

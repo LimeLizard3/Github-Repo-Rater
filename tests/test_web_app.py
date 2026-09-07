@@ -57,6 +57,14 @@ CANNED_RAW = {
         "status": "ok",
         "recommendations": ["Consider adding a CLI flag for custom output paths."],
     },
+    "popularity": {
+        "status": "ok",
+        "stars": 1234,
+        "forks": 56,
+        "watchers": 78,
+        "has_releases": True,
+        "release_downloads": 910,
+    },
     "strengths": ["[Architecture] Clear module boundaries"],
     "weaknesses": ["[Architecture] Some duplication"],
 }

@@ -82,6 +82,23 @@ class RecommendationsResult(BaseModel):
     error: Optional[str] = None
 
 
+class Popularity(BaseModel):
+    """Purely informational -- never read by _compute_quality_score() or any
+    other scoring logic. stars/forks/watchers come free from the same repo
+    metadata call the pipeline already makes; release_downloads needs one
+    extra call (see GitHubClient.get_release_downloads). has_releases
+    distinguishes "no releases published" (a real, valid absence) from
+    release_downloads being unset because the fetch itself failed."""
+
+    status: DimensionStatus
+    stars: Optional[int] = None
+    forks: Optional[int] = None
+    watchers: Optional[int] = None
+    has_releases: Optional[bool] = None
+    release_downloads: Optional[int] = None
+    error: Optional[str] = None
+
+
 class RepoRating(BaseModel):
     schema_version: Literal["1"] = "1"
     repo: str
@@ -91,5 +108,6 @@ class RepoRating(BaseModel):
     results_functionality: ResultsFunctionalityResult
     documentation: DocumentationResult
     recommendations: RecommendationsResult
+    popularity: Popularity
     strengths: list[str] = []
     weaknesses: list[str] = []
