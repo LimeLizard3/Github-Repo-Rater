@@ -1,0 +1,24 @@
+# Secrets -- never baked into the image; supplied at `docker run`/deploy
+# time instead (--env-file locally, Secret Manager in Phase 3).
+.env
+
+# Generated reports + cache/usage-cap state -- not part of the app itself,
+# and Phase 1 doesn't need them inside the image at all.
+reports/ratings/
+
+# Version control, caches, virtual envs -- never needed inside the image.
+.git/
+.gitignore
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+
+# The mobile app is a completely separate project (Expo/React Native) --
+# irrelevant to this backend container, and node_modules/ alone would be
+# huge to copy in for no reason.
+mobile-app/
+
+# Editor/IDE folders.
+.vscode/
+.claude/

@@ -17,6 +17,7 @@ the markdown text. No second parallel content template was introduced.
 from __future__ import annotations
 
 import base64
+import os
 import re
 import subprocess
 import tempfile
@@ -25,16 +26,26 @@ from pathlib import Path
 from typing import Any
 
 import markdown as markdown_lib
+from dotenv import load_dotenv
 
 from server.Report_Writing.report_schema import DimensionStatus, RepoRating
+
+# Guarantees .env is loaded before CHROME_PATH below reads os.environ,
+# regardless of whether some *other* module (server.config) happened to
+# import first and load it as a side effect. Safe to call more than once --
+# python-dotenv's load_dotenv() is idempotent. Discovered when CHROME_PATH
+# silently fell back to its Linux default in a test run where this file
+# happened to get imported before server.config did.
+load_dotenv()
 
 REPORTS_DIR = Path("reports/ratings")
 _LOGO_PATH = Path(__file__).parent / "assets" / "logo.png"
 
-# Hardcoded to the standard Windows install location -- this project runs
-# locally on Windows only for now. Revisit if this ever needs to run
-# somewhere Chrome isn't at this path (e.g. a server, Phase 7+).
-CHROME_PATH = Path(r"C:\Program Files\Google\Chrome\Application\chrome.exe")
+# Defaults to the Linux path (Chromium, installed inside the Docker image --
+# see Dockerfile) since that's where this now normally runs. Local Windows
+# dev is the exception now, not the rule -- it overrides via CHROME_PATH in
+# .env, set to the old hardcoded Windows install path.
+CHROME_PATH = Path(os.environ.get("CHROME_PATH", "/usr/bin/chromium"))
 
 _UNSAFE_FILENAME_CHARS = re.compile(r"[^A-Za-z0-9._-]")
 
@@ -529,11 +540,20 @@ def render_pdf(html_text: str, output_path: Path) -> None:
         tmp_html_path = Path(tmp.name)
 
     try:
+        # --no-sandbox: Chrome/Chromium refuses to start as the root user
+        # without this (confirmed via a real Phase 1 Docker test -- "Running
+        # as root without --no-sandbox is not supported"), and containers
+        # commonly run everything as root by default. Safe here specifically
+        # because the HTML being rendered is always our own generated
+        # content (never an arbitrary/untrusted web page), and this already
+        # runs inside Docker's own isolation on top of that. Harmless no-op
+        # on the local Windows install too.
         result = subprocess.run(
             [
                 str(CHROME_PATH),
                 "--headless",
                 "--disable-gpu",
+                "--no-sandbox",
                 "--no-pdf-header-footer",
                 f"--print-to-pdf={output_path}",
                 str(tmp_html_path),
