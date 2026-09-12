@@ -24,6 +24,14 @@ Routes:
     HTML route; once that second caller was gone, those two had exactly
     one caller left each, so they were folded back into rate_pdf()
     directly -- no remaining reason to keep them separate.
+
+    Cloud Run migration, Phase 6: generate_report() still writes .json/.md/
+    .pdf to local container disk (unchanged, and what the CLI still uses
+    directly) -- rate_pdf() then uploads that same content to Cloud Storage
+    (report_storage.py) and indexes THOSE object names, not local paths.
+    _pdf_response() fetches the actual PDF bytes back from the bucket
+    rather than serving a local file, so a served report survives a
+    redeploy even though the container's own disk doesn't.
 """
 
 from __future__ import annotations
@@ -34,14 +42,14 @@ from datetime import datetime, timezone
 
 from starlette.applications import Starlette
 from starlette.requests import Request
-from starlette.responses import FileResponse, JSONResponse
+from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
 from server import config
 from server.coordinator import rate_repo
 from server.github_client import GitHubAPIError, GitHubClient
 from server.Report_Writing.report_writer import generate_report, parse_rating
-from server.Website import cache_index, usage_cap
+from server.Website import cache_index, report_storage, usage_cap
 
 config.validate()
 config.validate_anthropic()
@@ -54,7 +62,7 @@ _gh = GitHubClient(config.GITHUB_TOKEN)
 _lock = asyncio.Lock() #Guarantees only 1 piece of code at a time can be inside a section that touches cache-index/usage files
 
 
-def _pdf_response(entry: cache_index.CacheEntry, owner: str, repo: str) -> JSONResponse | FileResponse:
+def _pdf_response(entry: cache_index.CacheEntry, owner: str, repo: str) -> JSONResponse | Response:
     if entry.pdf_path is None:
         return JSONResponse(
             {
@@ -63,10 +71,18 @@ def _pdf_response(entry: cache_index.CacheEntry, owner: str, repo: str) -> JSONR
             },
             status_code=500,
         )
-    return FileResponse(entry.pdf_path, media_type="application/pdf", filename=f"{owner}__{repo}.pdf")
+    # entry.pdf_path is a Cloud Storage object name now (Phase 6), not a
+    # local file -- FileResponse needs a real local path, so this fetches
+    # the actual bytes and returns them directly instead.
+    pdf_bytes = report_storage.download_bytes(entry.pdf_path)
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{owner}__{repo}.pdf"'},
+    )
 
 
-async def rate_pdf(request: Request) -> JSONResponse | FileResponse:
+async def rate_pdf(request: Request) -> JSONResponse | Response:
     try:
         body = await request.json()
     except Exception:
@@ -114,8 +130,20 @@ async def rate_pdf(request: Request) -> JSONResponse | FileResponse:
     rating = parse_rating(raw, generated_at)
     json_path, md_path, pdf_path = generate_report(rating)
 
+    # generate_report() just wrote these to local container disk, which
+    # gets wiped on the next redeploy -- upload each one's content to the
+    # bucket now, and index THOSE object names, not the local paths, so a
+    # later redeploy can still fetch the real content back (Phase 6).
+    json_object = report_storage.upload_file(json_path, json_path.name, "application/json")
+    md_object = report_storage.upload_file(md_path, md_path.name, "text/markdown")
+    pdf_object = (
+        report_storage.upload_file(pdf_path, pdf_path.name, "application/pdf")
+        if pdf_path is not None
+        else None
+    )
+
     async with _lock:
-        cache_index.record(owner, repo, sha, generated_at, json_path, md_path, pdf_path)
+        cache_index.record(owner, repo, sha, generated_at, json_object, md_object, pdf_object)
 
     return _pdf_response(
         cache_index.CacheEntry(
@@ -123,16 +151,16 @@ async def rate_pdf(request: Request) -> JSONResponse | FileResponse:
             repo=repo,
             sha=sha,
             generated_at=generated_at,
-            json_path=json_path,
-            md_path=md_path,
-            pdf_path=pdf_path,
+            json_path=json_object,
+            md_path=md_object,
+            pdf_path=pdf_object,
         ),
         owner,
         repo,
     )
 
 
-async def get_report_pdf(request: Request) -> JSONResponse | FileResponse:
+async def get_report_pdf(request: Request) -> JSONResponse | Response:
     owner = request.path_params["owner"]
     repo = request.path_params["repo"]
     entry = cache_index.latest_for_repo(owner, repo)

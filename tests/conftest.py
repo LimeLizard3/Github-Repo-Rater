@@ -11,13 +11,23 @@ It models the read/check/write LOGIC, not Firestore's real atomicity
 guarantee -- the transactional decorator is neutralized to a pass-through,
 since "the transaction is actually atomic across instances" is a Firestore
 promise, not something a unit test here should try to prove.
+
+`fake_storage` -- the same idea for report_storage.py (Phase 6): an
+in-memory stand-in for the narrow slice of the Cloud Storage API it uses,
+so uploading/downloading report files in a test never touches the real
+bucket. upload_file() reads real bytes off local disk (whatever
+generate_report() actually wrote to tmp_path in the test), so the fake
+still has to genuinely read that file -- it just stores the bytes in
+memory afterward instead of sending them to Cloud Storage.
 """
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
-from server.Website import cache_index, usage_cap
+from server.Website import cache_index, report_storage, usage_cap
 
 
 class _FakeSnapshot:
@@ -109,4 +119,42 @@ def fake_firestore(monkeypatch) -> FakeFirestore:
     monkeypatch.setattr(cache_index, "_get_db", lambda: fake)
     monkeypatch.setattr(usage_cap, "_get_db", lambda: fake)
     monkeypatch.setattr(usage_cap.firestore, "transactional", lambda fn: fn)
+    return fake
+
+
+class _FakeBlob:
+    def __init__(self, store: dict, name: str) -> None:
+        self._store = store
+        self._name = name
+
+    def upload_from_filename(self, filename: str, content_type: str | None = None) -> None:
+        self._store[self._name] = Path(filename).read_bytes()
+
+    def download_as_bytes(self) -> bytes:
+        return self._store[self._name]
+
+    def download_as_text(self) -> str:
+        return self._store[self._name].decode("utf-8")
+
+
+class _FakeBucket:
+    def __init__(self, store: dict) -> None:
+        self._store = store
+
+    def blob(self, name: str) -> _FakeBlob:
+        return _FakeBlob(self._store, name)
+
+
+class FakeStorage:
+    def __init__(self) -> None:
+        self._store: dict[str, bytes] = {}  # object name -> raw content
+
+    def bucket(self, name: str) -> _FakeBucket:
+        return _FakeBucket(self._store)
+
+
+@pytest.fixture
+def fake_storage(monkeypatch) -> FakeStorage:
+    fake = FakeStorage()
+    monkeypatch.setattr(report_storage, "_get_client", lambda: fake)
     return fake

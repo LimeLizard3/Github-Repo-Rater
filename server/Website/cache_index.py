@@ -8,32 +8,34 @@ is a cache lookup that needs to know whether the CODE has changed, not
 whether a day has passed.
 
 Stores pointers to the .json/.md/.pdf files, never the RepoRating inline --
-report_writer.py's persisted JSON stays the one source of truth for a
-rating's content, this just indexes it.
+those files stay the one source of truth for a rating's content, this just
+indexes them.
 
 Phase 5 of the Cloud Run migration (CLOUD_RUN_MIGRATION_PLAN.md): the index
 moved from a local `cache_index.json` file to a Firestore collection, so it
-survives redeploys and is shared across instances. NOTE: the .json/.md/.pdf
-files this points AT are still local disk until Phase 6 (Cloud Storage) --
-so after a redeploy, an entry can still be found here while the files it
-references are gone. Phase 5 and 6 need to land together for persistence to
-be real end to end.
+survives redeploys and is shared across instances.
+
+Phase 6: json_path/md_path/pdf_path are now Cloud Storage object names
+(plain strings), not local Path objects -- web_app.py uploads
+generate_report()'s local output to the bucket (see report_storage.py)
+before ever calling record() here, so what's indexed always points at
+something that survives a redeploy, not local disk that gets wiped.
 
 Firestore reads/writes here are synchronous, matching web_app.py's existing
-sync calls into this module. A blocking Firestore round-trip inside the
-async handler is fine at this scale (single instance, personal traffic) --
-the old code already did blocking file I/O in exactly these functions.
+sync calls into this module. A blocking round-trip inside the async
+handler is fine at this scale (single instance, personal traffic) -- the
+old code already did blocking file I/O in exactly these functions.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 
 from google.cloud import firestore
 
 from server.Report_Writing.report_schema import RepoRating
+from server.Website import report_storage
 
 _COLLECTION = "cache_index"
 _db: firestore.Client | None = None
@@ -57,12 +59,12 @@ class CacheEntry:
     repo: str
     sha: str
     generated_at: str
-    json_path: Path
-    md_path: Path
-    pdf_path: Path | None
+    json_path: str
+    md_path: str
+    pdf_path: str | None
 
     def load_rating(self) -> RepoRating:
-        return RepoRating.model_validate_json(self.json_path.read_text(encoding="utf-8"))
+        return RepoRating.model_validate_json(report_storage.download_text(self.json_path))
 
 
 def _doc_id(owner: str, repo: str, sha: str) -> str:
@@ -77,9 +79,9 @@ def _entry_from_dict(d: dict[str, Any]) -> CacheEntry:
         repo=d["repo"],
         sha=d["sha"],
         generated_at=d["generated_at"],
-        json_path=Path(d["json_path"]),
-        md_path=Path(d["md_path"]),
-        pdf_path=Path(d["pdf_path"]) if d.get("pdf_path") else None,
+        json_path=d["json_path"],
+        md_path=d["md_path"],
+        pdf_path=d.get("pdf_path"),
     )
 
 
@@ -96,9 +98,9 @@ def record(
     repo: str,
     sha: str,
     generated_at: str,
-    json_path: Path,
-    md_path: Path,
-    pdf_path: Path | None,
+    json_path: str,
+    md_path: str,
+    pdf_path: str | None,
 ) -> None:
     _get_db().collection(_COLLECTION).document(_doc_id(owner, repo, sha)).set(
         {
@@ -106,9 +108,9 @@ def record(
             "repo": repo,
             "sha": sha,
             "generated_at": generated_at,
-            "json_path": str(json_path),
-            "md_path": str(md_path),
-            "pdf_path": str(pdf_path) if pdf_path else None,
+            "json_path": json_path,
+            "md_path": md_path,
+            "pdf_path": pdf_path,
         }
     )
 

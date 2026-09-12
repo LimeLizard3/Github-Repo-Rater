@@ -11,10 +11,12 @@ GitHub reads are free, so test_bad_input_returns_4xx hits the real API for
 a nonexistent repo. Everything that would otherwise call Anthropic
 (rate_repo) is monkeypatched to a canned result -- no API cost.
 
-All file-backed state (cache index, usage cap, and report_writer's
-REPORTS_DIR itself, since generate_report() really runs against the canned
-data) is redirected into tmp_path so these tests never touch the real
-reports/ratings/ directory.
+All file-backed state is isolated: report_writer's REPORTS_DIR (since
+generate_report() really runs against the canned data) is redirected into
+tmp_path, and the cache index / usage cap / report storage (Phase 5-6, now
+Firestore + Cloud Storage) are covered by conftest.py's fake_firestore /
+fake_storage fixtures -- so these tests never touch real Google Cloud
+resources or the real reports/ratings/ directory.
 """
 
 from __future__ import annotations
@@ -71,11 +73,13 @@ CANNED_RAW = {
 
 
 @pytest.fixture
-def redirect_storage(tmp_path, monkeypatch, fake_firestore):
+def redirect_storage(tmp_path, monkeypatch, fake_firestore, fake_storage):
     """Isolates every store this test touches: report_writer still writes
-    .json/.md/.pdf to local disk in Phase 5, so REPORTS_DIR is redirected to
-    tmp_path; the cache index and usage cap now live in Firestore, handled
-    by the `fake_firestore` fixture (conftest.py)."""
+    .json/.md/.pdf to local disk (REPORTS_DIR redirected to tmp_path) --
+    that part is unchanged, and is what rate_pdf() then uploads from. The
+    cache index lives in Firestore (`fake_firestore`) and the uploaded
+    report files live in Cloud Storage (`fake_storage`), both faked here
+    (conftest.py) so no test touches real Google Cloud resources."""
     monkeypatch.setattr(report_writer, "REPORTS_DIR", tmp_path)
     return tmp_path
 
