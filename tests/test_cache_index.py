@@ -1,6 +1,7 @@
 """
-Unit tests for cache_index.py. Pure file I/O against a tmp_path-redirected
-index file -- no network, no API calls.
+Unit tests for cache_index.py. Runs against an in-memory fake Firestore
+(see conftest.py's `fake_firestore` fixture) -- no network, no API calls,
+same speed as the old tmp-file version.
 """
 
 from __future__ import annotations
@@ -10,13 +11,11 @@ from pathlib import Path
 from server.Website import cache_index
 
 
-def test_lookup_returns_none_when_no_index_file(tmp_path, monkeypatch):
-    monkeypatch.setattr(cache_index, "CACHE_INDEX_PATH", tmp_path / "cache_index.json")
+def test_lookup_returns_none_when_empty(fake_firestore):
     assert cache_index.lookup("owner", "repo", "abc123") is None
 
 
-def test_record_then_lookup_round_trips(tmp_path, monkeypatch):
-    monkeypatch.setattr(cache_index, "CACHE_INDEX_PATH", tmp_path / "cache_index.json")
+def test_record_then_lookup_round_trips(fake_firestore):
     cache_index.record(
         owner="owner",
         repo="repo",
@@ -35,8 +34,7 @@ def test_record_then_lookup_round_trips(tmp_path, monkeypatch):
     assert entry.pdf_path == Path("reports/ratings/owner__repo__20260820_report.pdf")
 
 
-def test_lookup_misses_on_different_sha(tmp_path, monkeypatch):
-    monkeypatch.setattr(cache_index, "CACHE_INDEX_PATH", tmp_path / "cache_index.json")
+def test_lookup_misses_on_different_sha(fake_firestore):
     cache_index.record(
         owner="owner", repo="repo", sha="abc123", generated_at="2026-08-20T12:00:00Z",
         json_path=Path("a.json"), md_path=Path("a.md"), pdf_path=Path("a.pdf"),
@@ -44,8 +42,15 @@ def test_lookup_misses_on_different_sha(tmp_path, monkeypatch):
     assert cache_index.lookup("owner", "repo", "different_sha") is None
 
 
-def test_null_pdf_path_round_trips_as_none(tmp_path, monkeypatch):
-    monkeypatch.setattr(cache_index, "CACHE_INDEX_PATH", tmp_path / "cache_index.json")
+def test_doc_id_sanitizes_the_slash(fake_firestore):
+    # The old on-disk key was f"{owner}/{repo}@{sha}"; Firestore doc IDs
+    # can't contain "/", so it must not appear in the key.
+    key = cache_index._doc_id("owner", "repo", "abc123")
+    assert "/" not in key
+    assert key == "owner__repo__abc123"
+
+
+def test_null_pdf_path_round_trips_as_none(fake_firestore):
     cache_index.record(
         owner="owner", repo="repo", sha="abc123", generated_at="2026-08-20T12:00:00Z",
         json_path=Path("a.json"), md_path=Path("a.md"), pdf_path=None,
@@ -55,8 +60,7 @@ def test_null_pdf_path_round_trips_as_none(tmp_path, monkeypatch):
     assert entry.pdf_path is None
 
 
-def test_latest_for_repo_picks_most_recent_generated_at(tmp_path, monkeypatch):
-    monkeypatch.setattr(cache_index, "CACHE_INDEX_PATH", tmp_path / "cache_index.json")
+def test_latest_for_repo_picks_most_recent_generated_at(fake_firestore):
     cache_index.record(
         owner="owner", repo="repo", sha="old_sha", generated_at="2026-08-19T12:00:00Z",
         json_path=Path("old.json"), md_path=Path("old.md"), pdf_path=Path("old.pdf"),
@@ -71,15 +75,21 @@ def test_latest_for_repo_picks_most_recent_generated_at(tmp_path, monkeypatch):
     assert latest.sha == "new_sha"
 
 
-def test_latest_for_repo_returns_none_when_no_entries(tmp_path, monkeypatch):
-    monkeypatch.setattr(cache_index, "CACHE_INDEX_PATH", tmp_path / "cache_index.json")
+def test_latest_for_repo_returns_none_when_no_entries(fake_firestore):
     assert cache_index.latest_for_repo("owner", "nonexistent-repo") is None
 
 
-def test_latest_for_repo_ignores_other_repos(tmp_path, monkeypatch):
-    monkeypatch.setattr(cache_index, "CACHE_INDEX_PATH", tmp_path / "cache_index.json")
+def test_latest_for_repo_ignores_other_repos(fake_firestore):
     cache_index.record(
         owner="owner", repo="other-repo", sha="sha1", generated_at="2026-08-20T12:00:00Z",
+        json_path=Path("a.json"), md_path=Path("a.md"), pdf_path=None,
+    )
+    assert cache_index.latest_for_repo("owner", "repo") is None
+
+
+def test_latest_for_repo_ignores_other_owners(fake_firestore):
+    cache_index.record(
+        owner="someone-else", repo="repo", sha="sha1", generated_at="2026-08-20T12:00:00Z",
         json_path=Path("a.json"), md_path=Path("a.md"), pdf_path=None,
     )
     assert cache_index.latest_for_repo("owner", "repo") is None

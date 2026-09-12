@@ -71,11 +71,12 @@ CANNED_RAW = {
 
 
 @pytest.fixture
-def redirect_storage(tmp_path, monkeypatch):
-    """Points every file-backed store this test touches at tmp_path."""
+def redirect_storage(tmp_path, monkeypatch, fake_firestore):
+    """Isolates every store this test touches: report_writer still writes
+    .json/.md/.pdf to local disk in Phase 5, so REPORTS_DIR is redirected to
+    tmp_path; the cache index and usage cap now live in Firestore, handled
+    by the `fake_firestore` fixture (conftest.py)."""
     monkeypatch.setattr(report_writer, "REPORTS_DIR", tmp_path)
-    monkeypatch.setattr(cache_index, "CACHE_INDEX_PATH", tmp_path / "cache_index.json")
-    monkeypatch.setattr(usage_cap, "USAGE_CAP_PATH", tmp_path / "usage_cap.json")
     return tmp_path
 
 
