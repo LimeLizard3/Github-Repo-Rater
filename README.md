@@ -77,12 +77,12 @@ npx expo start        # live preview via the Expo Go app, or:
 npx eas-cli build --platform android --profile preview   # standalone .apk
 ```
 
-`API_BASE_URL` points at the real backend, deployed on Cloud Run (see
-`CLOUD_RUN_MIGRATION_PLAN.md`) — a permanent public URL, independent of
-any laptop or local network. Earlier this pointed at a raw LAN IP, then
-an ngrok tunnel, since a phone can't reach `localhost` on your computer
-and a LAN IP breaks every time the computer changes networks — Cloud Run
-removes the need for either workaround entirely.
+Since a phone can't reach `localhost` on your computer, `API_BASE_URL`
+needs a real reachable address for the backend. A raw LAN IP breaks
+every time the computer changes networks (campus wifi vs. hotspot vs.
+home wifi all assign a different one) — a tunnel (e.g. ngrok, with a
+free static domain) avoids that instability. See the comment above
+`API_BASE_URL` in `App.tsx` for the current value and reasoning.
 
 ## Known limitations (by design, for now)
 
@@ -90,12 +90,14 @@ removes the need for either workaround entirely.
   so "does it run" is inferred from reading, not verified.
 - `GITHUB_TOKEN` is a personal PAT — fine at this scale; a GitHub App
   installation token would be the upgrade for real public traffic.
+- No horizontal scaling — the website assumes a single `uvicorn`
+  process; the file-backed cache index and usage cap aren't safe across
+  multiple worker processes.
 - No user accounts — the website is fully public and anonymous, gated
   only by the shared daily usage cap.
-- `--allow-unauthenticated` on the Cloud Run deploy means anyone with
-  the URL can call it — the daily usage cap is the only real protection
-  right now (see `CLOUD_RUN_MIGRATION_PLAN.md`'s optional Phase 9 for
-  adding real auth).
+- The mobile app's backend address is currently a personal ngrok
+  tunnel + a laptop that has to be on and running the server — not a
+  hosted, always-available backend yet.
 
 ## Project layout
 

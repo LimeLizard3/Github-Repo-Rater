@@ -12,11 +12,12 @@ import { StatusBar } from 'expo-status-bar';
 import { File, Paths } from 'expo-file-system';
 import * as Sharing from 'expo-sharing';
 
-// The real backend, deployed on Cloud Run (CLOUD_RUN_MIGRATION_PLAN.md) --
-// a permanent public URL, not tied to any laptop or local network at all.
-// No tunnel, no "what wifi is the laptop on" problem: this runs whether
-// the laptop is on, off, or asleep.
-const API_BASE_URL = 'https://repo-rater-backend-610667567550.asia-south1.run.app';
+// Routed through an ngrok tunnel (see `ngrok http 8000 --domain=...`),
+// not a direct local-network address -- this stays fixed no matter what
+// network the laptop is on, as long as the tunnel and the backend server
+// are both running. https, no port: ngrok terminates TLS on 443 and
+// forwards internally to localhost:8000.
+const API_BASE_URL = 'https://preamble-statute-rising.ngrok-free.dev';
 
 // Accepts "owner/repo", or a pasted "https://github.com/owner/repo" URL,
 // and pulls out just the two names web_app.py's /api/rate expects.
